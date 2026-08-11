@@ -132,4 +132,112 @@ export const agentTools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "memory_create_entity",
+      description:
+        "Create or update a long-lived memory entity (person, project, tool, concept) in the workspace knowledge graph.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Entity name (unique per workspace)." },
+          entity_type: {
+            type: "string",
+            enum: ["person", "project", "tool", "concept"],
+            description: "Entity category.",
+          },
+          observations: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional initial observation strings.",
+          },
+        },
+        required: ["name", "entity_type"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory_add_observation",
+      description:
+        "Append a durable observation to an existing memory entity (creates the entity if missing).",
+      parameters: {
+        type: "object",
+        properties: {
+          entity_name: { type: "string" },
+          observation: { type: "string" },
+        },
+        required: ["entity_name", "observation"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory_create_relation",
+      description:
+        "Link two memory entities with a relation (e.g. works_on, uses, manages).",
+      parameters: {
+        type: "object",
+        properties: {
+          source_entity: { type: "string" },
+          target_entity: { type: "string" },
+          relation_type: { type: "string" },
+        },
+        required: ["source_entity", "target_entity", "relation_type"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory_search",
+      description:
+        "Search the workspace memory graph for entities and relations matching a query.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search text (name, type, observation)." },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "schedule_task",
+      description: [
+        "Create a recurring proactive agent job (agentic cron).",
+        "cron_expression is 5-field UTC cron, e.g. '0 9 * * 1-5' for 09:00 UTC weekdays.",
+        "The agent will run the prompt on schedule and can post to slack_channel.",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          cron_expression: { type: "string" },
+          prompt: { type: "string" },
+          slack_channel: {
+            type: "string",
+            description: "Optional Slack channel ID for results.",
+          },
+        },
+        required: ["name", "cron_expression", "prompt"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_scheduled_tasks",
+      description: "List proactive scheduled tasks for this workspace.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+    },
+  },
 ];

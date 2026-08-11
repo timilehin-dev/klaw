@@ -15,10 +15,13 @@
     "./memory": "./memory.ts",
     "./logging": "./logging.ts",
     "./guardrails": "./guardrails.ts",
+    "./cron": "./cron.ts",
+    "./workspace-tokens": "./workspace-tokens.ts",
     "./skills/registry": "./skills/registry.ts",
     "./skills/catalog": "./skills/catalog.ts"
   },
   "dependencies": {
+    "@klaw/database": "*",
     "@slack/web-api": "^7.19.0",
     "@supabase/supabase-js": "^2.112.3",
     "inngest": "^3.22.0",

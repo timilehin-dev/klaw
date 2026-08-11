@@ -15,8 +15,17 @@ import {
   loadHistory,
   saveMessage,
   loadConstraints,
+  loadMemoryContext,
+  createMemoryEntity,
+  addObservation,
+  createMemoryRelation,
+  searchMemory,
+  createScheduledTask,
+  listScheduledTasks,
 } from "./memory";
 import { getSlack, getSupabase } from "./clients";
+import { getWorkspaceSlackClient } from "./workspace-tokens";
+import { createCronDispatcher } from "./cron";
 import { appendAgentLog } from "./logging";
 import { requiresHumanApproval } from "./guardrails";
 import {
@@ -26,6 +35,7 @@ import {
 } from "./skills/registry";
 
 export const inngest = new Inngest({ id: "klaw" });
+export const handleScheduledTasks = createCronDispatcher(inngest);
 
 const MAX_SELF_HEAL_FIXES = 2;
 
@@ -72,7 +82,12 @@ export const handleAgentTask = inngest.createFunction(
     const slackThreadTs: string | null =
       triggerSource === "slack" ? threadId : null;
     const workspace =
-      workspaceKey || (triggerSource === "web" ? "web" : "default");
+      workspaceKey ||
+      (triggerSource === "web"
+        ? "web"
+        : triggerSource === "cron"
+          ? workspaceKey || "default"
+          : "default");
 
     // 1. Schema-safe memory
     const dbThreadId = await step.run("init-memory", async () => {
@@ -80,6 +95,7 @@ export const handleAgentTask = inngest.createFunction(
       if (triggerSource === "web") {
         id = threadId as string;
       } else {
+        // slack + cron: map external/synthetic thread keys → internal UUID
         id = await ensureThreadExists(threadId, workspace, channel || "");
       }
       await saveMessage(id, "user", message);
@@ -94,11 +110,13 @@ export const handleAgentTask = inngest.createFunction(
     const systemPrompt = await step.run("load-context", async () => {
       const skillsContext = loadSkillPrompts();
       const constraintsContext = await loadConstraints(workspace);
+      const memoryContext = await loadMemoryContext(workspace);
       const prompt =
         buildBaseSystemPrompt() +
         skillsContext +
         constraintsContext +
-        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions. Use web_search (Tavily) for research; use browser_action for interactive/JS sites.";
+        memoryContext +
+        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions. Use web_search (Tavily) for research; browser tools for interactive sites. Persist durable facts with memory_* tools. Use schedule_task for recurring proactive work (UTC cron).";
       await appendAgentLog(dbThreadId, "load-context", "completed");
       return prompt;
     });
@@ -195,6 +213,154 @@ export const handleAgentTask = inngest.createFunction(
               role: "tool",
               tool_call_id: tc.id,
               content: "Error: invalid tool arguments JSON",
+            });
+            continue;
+          }
+
+          // --- MEMORY GRAPH ---
+          if (toolName === "memory_create_entity") {
+            const out = await step.run(`memory-entity-${tc.id}`, async () => {
+              await createMemoryEntity(
+                workspace,
+                String(toolArgs.name),
+                String(toolArgs.entity_type || "concept"),
+                Array.isArray(toolArgs.observations)
+                  ? toolArgs.observations.map(String)
+                  : []
+              );
+              await appendAgentLog(
+                dbThreadId,
+                "memory_create_entity",
+                "completed",
+                toolArgs.name
+              );
+              return `Memory entity saved: ${toolArgs.name}`;
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
+            });
+            continue;
+          }
+
+          if (toolName === "memory_add_observation") {
+            const out = await step.run(`memory-obs-${tc.id}`, async () => {
+              await addObservation(
+                workspace,
+                String(toolArgs.entity_name),
+                String(toolArgs.observation)
+              );
+              await appendAgentLog(
+                dbThreadId,
+                "memory_add_observation",
+                "completed",
+                toolArgs.entity_name
+              );
+              return `Observation added to ${toolArgs.entity_name}`;
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
+            });
+            continue;
+          }
+
+          if (toolName === "memory_create_relation") {
+            const out = await step.run(`memory-rel-${tc.id}`, async () => {
+              await createMemoryRelation(
+                workspace,
+                String(toolArgs.source_entity),
+                String(toolArgs.target_entity),
+                String(toolArgs.relation_type)
+              );
+              await appendAgentLog(
+                dbThreadId,
+                "memory_create_relation",
+                "completed"
+              );
+              return `Relation saved: ${toolArgs.source_entity} —[${toolArgs.relation_type}]→ ${toolArgs.target_entity}`;
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
+            });
+            continue;
+          }
+
+          if (toolName === "memory_search") {
+            const out = await step.run(`memory-search-${tc.id}`, async () => {
+              const r = await searchMemory(
+                workspace,
+                String(toolArgs.query || "")
+              );
+              await appendAgentLog(
+                dbThreadId,
+                "memory_search",
+                "completed",
+                toolArgs.query
+              );
+              return r;
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
+            });
+            continue;
+          }
+
+          // --- SCHEDULED TASKS ---
+          if (toolName === "schedule_task") {
+            const out = await step.run(`schedule-task-${tc.id}`, async () => {
+              const created = await createScheduledTask({
+                workspaceId: workspace,
+                name: String(toolArgs.name),
+                cronExpression: String(toolArgs.cron_expression),
+                prompt: String(toolArgs.prompt),
+                slackChannel: toolArgs.slack_channel
+                  ? String(toolArgs.slack_channel)
+                  : undefined,
+              });
+              await appendAgentLog(
+                dbThreadId,
+                "schedule_task",
+                "completed",
+                created.id
+              );
+              return `Scheduled task created: ${toolArgs.name} (id=${created.id}, cron=${toolArgs.cron_expression} UTC)`;
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
+            });
+            continue;
+          }
+
+          if (toolName === "list_scheduled_tasks") {
+            const out = await step.run(`list-schedules-${tc.id}`, async () => {
+              const tasks = await listScheduledTasks(workspace);
+              await appendAgentLog(
+                dbThreadId,
+                "list_scheduled_tasks",
+                "completed",
+                `${tasks.length} tasks`
+              );
+              if (tasks.length === 0) return "No scheduled tasks.";
+              return tasks
+                .map(
+                  (t) =>
+                    `- ${t.name} [${t.active ? "active" : "off"}] cron=${t.cron_expression} last=${t.last_run_at || "never"}\n  prompt: ${t.prompt.slice(0, 120)}`
+                )
+                .join("\n");
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
             });
             continue;
           }
@@ -331,7 +497,9 @@ export const handleAgentTask = inngest.createFunction(
                   decision: "denied",
                 });
 
-                await getSlack().chat.postMessage({
+                const approvalClient =
+                  (await getWorkspaceSlackClient(workspace)) || getSlack();
+                await approvalClient.chat.postMessage({
                   channel,
                   thread_ts: slackThreadTs,
                   text: "⚠️ Approval required for agent code execution",
@@ -511,14 +679,19 @@ export const handleAgentTask = inngest.createFunction(
       });
     }
 
-    if (triggerSource === "slack" && channel && slackThreadTs) {
+    if (
+      (triggerSource === "slack" || triggerSource === "cron") &&
+      channel
+    ) {
       await step.run("reply-slack", async () => {
         logger.info(
-          `Slack reply channel=${channel} thread_ts=${slackThreadTs} model=${modelUsed}`
+          `Slack reply channel=${channel} thread_ts=${slackThreadTs || "n/a"} model=${modelUsed} source=${triggerSource}`
         );
-        await getSlack().chat.postMessage({
+        const client =
+          (await getWorkspaceSlackClient(workspace)) || getSlack();
+        await client.chat.postMessage({
           channel,
-          thread_ts: slackThreadTs,
+          ...(slackThreadTs ? { thread_ts: slackThreadTs } : {}),
           text: finalResponseText,
         });
         await appendAgentLog(dbThreadId, "reply-slack", "completed");
@@ -562,8 +735,21 @@ export {
   loadHistory,
   saveMessage,
   loadConstraints,
+  loadMemoryContext,
+  createMemoryEntity,
+  addObservation,
+  createMemoryRelation,
+  searchMemory,
+  createScheduledTask,
+  listScheduledTasks,
+  deactivateScheduledTask,
 } from "./memory";
 export { getSupabase, getSlack, supabase, slack } from "./clients";
+export {
+  getWorkspaceBotToken,
+  getWorkspaceSlackClient,
+} from "./workspace-tokens";
+export { cronMatches, createCronDispatcher } from "./cron";
 export { appendAgentLog } from "./logging";
 export type { AgentLogStatus } from "./logging";
 export { requiresHumanApproval, codeLooksDestructive } from "./guardrails";

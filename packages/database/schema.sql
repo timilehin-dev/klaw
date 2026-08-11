@@ -6,8 +6,14 @@ create table if not exists workspaces (
   id uuid default uuid_generate_v4() primary key,
   slack_team_id text unique not null,
   slack_team_name text,
+  slack_bot_token_encrypted text, -- AES-256-GCM encrypted bot token (multi-tenant OAuth)
+  slack_bot_user_id text,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+
+-- Phase 9: add OAuth columns if workspaces already existed without them
+alter table workspaces add column if not exists slack_bot_token_encrypted text;
+alter table workspaces add column if not exists slack_bot_user_id text;
 
 create table if not exists threads (
   id uuid default uuid_generate_v4() primary key,
@@ -87,6 +93,46 @@ create table if not exists constraints (
 
 create index if not exists constraints_workspace_id_idx on constraints (workspace_id);
 
+-- Phase 9: Persistent memory graph (workspace_id = slack_team_id or 'web')
+create table if not exists memory_entities (
+  id uuid default uuid_generate_v4() primary key,
+  workspace_id text not null,
+  name text not null,
+  entity_type text not null, -- 'person' | 'project' | 'tool' | 'concept'
+  observations jsonb default '[]'::jsonb,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  unique (workspace_id, name)
+);
+
+create table if not exists memory_relations (
+  id uuid default uuid_generate_v4() primary key,
+  workspace_id text not null,
+  source_entity text not null,
+  target_entity text not null,
+  relation_type text not null, -- e.g. 'works_on' | 'uses' | 'manages'
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+create index if not exists memory_entities_workspace_idx on memory_entities (workspace_id);
+create index if not exists memory_relations_workspace_idx on memory_relations (workspace_id);
+
+-- Phase 9: Proactive autonomy (agentic cron)
+create table if not exists scheduled_tasks (
+  id uuid default uuid_generate_v4() primary key,
+  workspace_id text not null,
+  name text not null,
+  cron_expression text not null, -- e.g. '0 9 * * 1-5'
+  prompt text not null,
+  slack_channel text, -- optional destination for results
+  active boolean default true,
+  last_run_at timestamp with time zone,
+  next_run_at timestamp with time zone,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+create index if not exists scheduled_tasks_active_next_idx
+  on scheduled_tasks (active, next_run_at);
+
 -- Enable RLS
 alter table agent_logs enable row level security;
 alter table messages enable row level security;
@@ -96,6 +142,9 @@ alter table agent_runs enable row level security;
 alter table workspaces enable row level security;
 alter table approvals enable row level security;
 alter table constraints enable row level security;
+alter table memory_entities enable row level security;
+alter table memory_relations enable row level security;
+alter table scheduled_tasks enable row level security;
 
 -- MVP open policies (tighten with auth later)
 do $$
@@ -123,5 +172,14 @@ begin
   end if;
   if not exists (select 1 from pg_policies where policyname = 'mvp_all_constraints') then
     create policy "mvp_all_constraints" on constraints for all using (true) with check (true);
+  end if;
+  if not exists (select 1 from pg_policies where policyname = 'mvp_all_memory_entities') then
+    create policy "mvp_all_memory_entities" on memory_entities for all using (true) with check (true);
+  end if;
+  if not exists (select 1 from pg_policies where policyname = 'mvp_all_memory_relations') then
+    create policy "mvp_all_memory_relations" on memory_relations for all using (true) with check (true);
+  end if;
+  if not exists (select 1 from pg_policies where policyname = 'mvp_all_scheduled_tasks') then
+    create policy "mvp_all_scheduled_tasks" on scheduled_tasks for all using (true) with check (true);
   end if;
 end $$;
