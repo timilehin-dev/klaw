@@ -8,9 +8,13 @@
     ".": "./index.ts",
     "./llm/router": "./llm/router.ts",
     "./tools/definitions": "./tools/definitions.ts",
-    "./modal/client": "./modal/client.ts"
+    "./modal/client": "./modal/client.ts",
+    "./clients": "./clients.ts",
+    "./memory": "./memory.ts"
   },
   "dependencies": {
+    "@slack/web-api": "^7.19.0",
+    "@supabase/supabase-js": "^2.112.3",
     "inngest": "^3.22.0",
     "zod": "^3.25.76"
   }

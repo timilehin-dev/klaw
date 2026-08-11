@@ -18,6 +18,10 @@ create table threads (
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
+-- Lookup Slack conversations without stuffing thread_ts into the UUID PK
+create unique index if not exists threads_workspace_channel_ts_uidx
+  on threads (workspace_id, slack_channel, slack_thread_ts);
+
 create table messages (
   id uuid default uuid_generate_v4() primary key,
   thread_id uuid references threads(id) not null,
@@ -25,6 +29,9 @@ create table messages (
   content text,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+
+create index if not exists messages_thread_id_created_at_idx
+  on messages (thread_id, created_at);
 
 create table artifacts (
   id uuid default uuid_generate_v4() primary key,
