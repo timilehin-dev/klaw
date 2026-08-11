@@ -6,7 +6,7 @@ export const agentTools = [
     function: {
       name: "execute_code",
       description:
-        "Execute Python code in a secure sandbox to perform calculations, data analysis, generate files, or scrape web pages. Use this for complex tasks that require computation.",
+        "Execute Python code in a secure sandbox (pandas, requests, matplotlib) to perform calculations, data analysis, generate files, or scrape web pages. Use this for complex tasks that require computation.",
       parameters: {
         type: "object",
         properties: {

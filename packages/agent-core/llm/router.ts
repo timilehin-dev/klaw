@@ -6,12 +6,16 @@ export type LLMMessage = {
   name?: string;
 };
 
+/**
+ * Call a Modal-hosted OpenAI-compatible LLM endpoint.
+ * Returns the assistant message: { role, content, tool_calls? }
+ */
 export async function callLLM(
   model: "kimi-k3" | "deepseek-v4-pro",
   systemPrompt: string,
   messages: LLMMessage[],
   tools?: any[]
-): Promise<any> {
+): Promise<LLMMessage> {
   const KIMI_K3_URL =
     process.env.KIMI_K3_URL ||
     "https://timilehinolajide32--ep-kimi-k3-server.us-west.modal.direct";
@@ -24,12 +28,12 @@ export async function callLLM(
     throw new Error(`No Modal endpoint configured for model: ${model}`);
   }
 
-  // OpenAI-compatible chat completion (Modal endpoints typically expose this)
   const payload: Record<string, unknown> = {
     model,
     messages: [{ role: "system", content: systemPrompt }, ...messages],
   };
 
+  // Add tools if provided
   if (tools && tools.length > 0) {
     payload.tools = tools;
     payload.tool_choice = "auto";
@@ -39,7 +43,6 @@ export async function callLLM(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      // "Authorization": `Bearer ${process.env.MODAL_KEY}` // Add if required
     },
     body: JSON.stringify(payload),
   });
@@ -47,9 +50,10 @@ export async function callLLM(
   if (!response.ok) {
     const errorBody = await response.text().catch(() => "");
     throw new Error(
-      `Modal LLM Error: ${response.status} ${response.statusText}${errorBody ? ` — ${errorBody}` : ""}`
+      `Modal LLM Error: ${response.statusText}${errorBody ? ` — ${errorBody}` : ""}`
     );
   }
 
-  return await response.json();
+  const data = await response.json();
+  return data.choices[0].message; // { role, content, tool_calls? }
 }
