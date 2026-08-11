@@ -11,6 +11,7 @@
     "./modal/client": "./modal/client.ts",
     "./clients": "./clients.ts",
     "./memory": "./memory.ts",
+    "./logging": "./logging.ts",
     "./skills/registry": "./skills/registry.ts",
     "./skills/catalog": "./skills/catalog.ts"
   },

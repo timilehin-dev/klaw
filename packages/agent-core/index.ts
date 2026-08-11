@@ -10,6 +10,7 @@ import { agentTools } from "./tools/definitions";
 import { executeCodeInSandbox } from "./modal/client";
 import { ensureThreadExists, loadHistory, saveMessage } from "./memory";
 import { getSlack } from "./clients";
+import { appendAgentLog } from "./logging";
 import {
   buildBaseSystemPrompt,
   loadSkillPrompts,
@@ -60,34 +61,51 @@ export const handleAgentTask = inngest.createFunction(
       workspaceId: workspaceKey,
     } = event.data;
 
-    const slackThreadTs: string = threadId;
-    const workspace = workspaceKey || "default";
+    // Slack events pass thread_ts; web dashboard passes internal UUID from /api/threads
+    const slackThreadTs: string | null =
+      triggerSource === "slack" ? threadId : null;
+    const workspace = workspaceKey || (triggerSource === "web" ? "web" : "default");
 
     // 1. Schema-safe memory (internal UUID thread id)
     const dbThreadId = await step.run("init-memory", async () => {
-      const id = await ensureThreadExists(
-        slackThreadTs,
-        workspace,
-        channel || ""
-      );
+      let id: string;
+      if (triggerSource === "web") {
+        // Dashboard already created the thread row
+        id = threadId as string;
+      } else {
+        id = await ensureThreadExists(
+          threadId,
+          workspace,
+          channel || ""
+        );
+      }
       await saveMessage(id, "user", message);
+      await appendAgentLog(id, "task/received", "completed", triggerSource);
       logger.info(
-        `Memory ready thread_db=${id} slack_ts=${slackThreadTs} user=${user || "n/a"}`
+        `Memory ready thread_db=${id} source=${triggerSource} user=${user || "n/a"}`
       );
       return id;
     });
 
     // 2. Base prompt + 8 skills (+ dependency guidance)
     const systemPrompt = await step.run("load-context", async () => {
-      return (
+      const prompt =
         buildBaseSystemPrompt() +
         loadSkillPrompts() +
-        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`."
-      );
+        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`.";
+      await appendAgentLog(dbThreadId, "load-context", "completed");
+      return prompt;
     });
 
     const history = await step.run("load-history", async () => {
-      return await loadHistory(dbThreadId);
+      const h = await loadHistory(dbThreadId);
+      await appendAgentLog(
+        dbThreadId,
+        "load-history",
+        "completed",
+        `${h.length} messages`
+      );
+      return h;
     });
 
     const messages: LLMMessage[] = [...history];
@@ -104,7 +122,10 @@ export const handleAgentTask = inngest.createFunction(
     if (useReasoning) {
       const llmResponse = await step.run("think-reasoning", async () => {
         logger.info("DeepSeek V4 Pro reasoning-only path...");
-        return await callLLM("deepseek-v4-pro", systemPrompt, messages);
+        await appendAgentLog(dbThreadId, "think-deepseek", "running");
+        const res = await callLLM("deepseek-v4-pro", systemPrompt, messages);
+        await appendAgentLog(dbThreadId, "think-deepseek", "completed");
+        return res;
       });
 
       if (llmResponse.content) {
@@ -114,9 +135,16 @@ export const handleAgentTask = inngest.createFunction(
         iterations = 1;
         await step.run("save-response", async () => {
           await saveMessage(dbThreadId, "assistant", finalResponseText);
+          await appendAgentLog(dbThreadId, "save-response", "completed");
         });
       } else {
         logger.warn("DeepSeek empty; falling back to Kimi agentic loop");
+        await appendAgentLog(
+          dbThreadId,
+          "think-deepseek",
+          "failed",
+          "empty content; fallback to kimi"
+        );
       }
     }
 
@@ -127,7 +155,26 @@ export const handleAgentTask = inngest.createFunction(
 
       const llmResponse = await step.run(`think-kimi-${iterations}`, async () => {
         logger.info(`Iteration ${iterations}: Kimi K3 thinking...`);
-        return await callLLM("kimi-k3", systemPrompt, messages, agentTools);
+        await appendAgentLog(
+          dbThreadId,
+          `think-kimi-${iterations}`,
+          "running"
+        );
+        const res = await callLLM(
+          "kimi-k3",
+          systemPrompt,
+          messages,
+          agentTools
+        );
+        await appendAgentLog(
+          dbThreadId,
+          `think-kimi-${iterations}`,
+          "completed",
+          res.tool_calls?.length
+            ? `${res.tool_calls.length} tool call(s)`
+            : "final content"
+        );
+        return res;
       });
 
       if (llmResponse.tool_calls && llmResponse.tool_calls.length > 0) {
@@ -172,7 +219,21 @@ export const handleAgentTask = inngest.createFunction(
                 logger.info(
                   `Modal execute attempt ${fixAttempts + 1}; deps=[${dependencies.join(", ")}]`
                 );
-                return await executeCodeInSandbox(codeToRun, { dependencies });
+                await appendAgentLog(
+                  dbThreadId,
+                  `execute-code-a${fixAttempts}`,
+                  "running"
+                );
+                const r = await executeCodeInSandbox(codeToRun, {
+                  dependencies,
+                });
+                await appendAgentLog(
+                  dbThreadId,
+                  `execute-code-a${fixAttempts}`,
+                  r.success ? "completed" : "failed",
+                  r.success ? undefined : r.stderr?.slice(0, 200)
+                );
+                return r;
               }
             );
 
@@ -186,10 +247,21 @@ export const handleAgentTask = inngest.createFunction(
               codeToRun = await step.run(
                 `fix-code-deepseek-${iterations}-a${fixAttempts}-${tc.id}`,
                 async () => {
-                  return await fixCodeWithDeepSeek(
+                  await appendAgentLog(
+                    dbThreadId,
+                    `fix-deepseek-a${fixAttempts}`,
+                    "running"
+                  );
+                  const fixed = await fixCodeWithDeepSeek(
                     codeToRun,
                     execResult.stderr || "Unknown error"
                   );
+                  await appendAgentLog(
+                    dbThreadId,
+                    `fix-deepseek-a${fixAttempts}`,
+                    "completed"
+                  );
+                  return fixed;
                 }
               );
               fixAttempts++;
@@ -210,6 +282,7 @@ export const handleAgentTask = inngest.createFunction(
         finalResponseText = llmResponse.content;
         await step.run("save-response", async () => {
           await saveMessage(dbThreadId, "assistant", finalResponseText);
+          await appendAgentLog(dbThreadId, "save-response", "completed");
         });
       } else {
         done = true;
@@ -217,6 +290,7 @@ export const handleAgentTask = inngest.createFunction(
           "I encountered an issue processing that request.";
         await step.run("save-empty-fallback", async () => {
           await saveMessage(dbThreadId, "assistant", finalResponseText);
+          await appendAgentLog(dbThreadId, "save-empty-fallback", "failed");
         });
       }
     }
@@ -226,11 +300,12 @@ export const handleAgentTask = inngest.createFunction(
         "I hit the maximum number of reasoning steps without a final answer. Please try a simpler request.";
       await step.run("save-max-iter-fallback", async () => {
         await saveMessage(dbThreadId, "assistant", finalResponseText);
+        await appendAgentLog(dbThreadId, "max-iterations", "failed");
       });
     }
 
-    // 4. Slack threaded reply
-    if (triggerSource === "slack" && channel) {
+    // 4. Slack threaded reply (web UI polls Supabase for assistant message)
+    if (triggerSource === "slack" && channel && slackThreadTs) {
       await step.run("reply-slack", async () => {
         logger.info(
           `Slack reply channel=${channel} thread_ts=${slackThreadTs} model=${modelUsed}`
@@ -240,6 +315,11 @@ export const handleAgentTask = inngest.createFunction(
           thread_ts: slackThreadTs,
           text: finalResponseText,
         });
+        await appendAgentLog(dbThreadId, "reply-slack", "completed");
+      });
+    } else if (triggerSource === "web") {
+      await step.run("reply-web", async () => {
+        await appendAgentLog(dbThreadId, "reply-web", "completed", "poll UI");
       });
     }
 
@@ -269,6 +349,8 @@ export {
   saveMessage,
 } from "./memory";
 export { getSupabase, getSlack, supabase, slack } from "./clients";
+export { appendAgentLog } from "./logging";
+export type { AgentLogStatus } from "./logging";
 export {
   loadSkillPrompts,
   listSkills,
