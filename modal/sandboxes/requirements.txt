@@ -71,3 +71,4 @@ regex
 tqdm
 tenacity
 sqlalchemy
+psycopg2-binary

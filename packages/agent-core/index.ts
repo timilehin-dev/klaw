@@ -1,9 +1,14 @@
 import { Inngest } from "inngest";
-import { callLLM, LLMMessage } from "./llm/router";
+import { callLLM, LLMMessage, selectModel, type ModelId } from "./llm/router";
 import { agentTools } from "./tools/definitions";
 import { executeCodeInSandbox } from "./modal/client";
 import { ensureThreadExists, loadHistory, saveMessage } from "./memory";
 import { getSlack } from "./clients";
+import {
+  buildBaseSystemPrompt,
+  loadSkillPrompts,
+  prefersReasoningModel,
+} from "./skills/registry";
 
 export const inngest = new Inngest({ id: "klaw" });
 
@@ -41,9 +46,9 @@ export const handleAgentTask = inngest.createFunction(
       return id;
     });
 
-    // 2. Load system prompt + prior history (history includes the user msg we just saved)
+    // 2. System prompt = base + 8 industry skills
     const systemPrompt = await step.run("load-context", async () => {
-      return `You are an expert AI engineer assistant for Klaw. You have access to a tool called 'execute_code' which runs Python 3.11 in a secure 32GB Modal sandbox. Libraries are preinstalled globally (numpy, pandas, polars, duckdb, scipy, scikit-learn, matplotlib, seaborn, plotly, python-docx, python-pptx, openpyxl, reportlab, PyMuPDF, pdfplumber, Pillow, opencv, pytesseract, requests, httpx, beautifulsoup4, sympy, and more) — never pip install. Write files to the working directory; they are returned. Use the tool for calculations, data analysis, document generation, plotting, or scraping.`;
+      return buildBaseSystemPrompt() + loadSkillPrompts();
     });
 
     const history = await step.run("load-history", async () => {
@@ -53,16 +58,55 @@ export const handleAgentTask = inngest.createFunction(
     // History already contains the latest user message — do not duplicate
     const messages: LLMMessage[] = [...history];
 
+    // Dual-model: pure reasoning/review → DeepSeek (no tools); else Kimi agentic loop
+    const useReasoning = prefersReasoningModel(message);
+    const primaryModel: ModelId = selectModel(
+      useReasoning ? "reasoning" : "agentic"
+    );
+    logger.info(
+      `Model policy: ${primaryModel} (reasoning=${useReasoning})`
+    );
+
     let iterations = 0;
     let done = false;
     let finalResponseText = "";
+    let modelUsed: ModelId = primaryModel;
 
-    // 3. Durable agent loop (Think -> Act -> Observe)
+    // 3a. Reasoning-only path (DeepSeek V4 Pro, no tools)
+    if (useReasoning) {
+      const llmResponse = await step.run("think-reasoning", async () => {
+        logger.info("Calling DeepSeek V4 Pro for reasoning-only path...");
+        return await callLLM(
+          "deepseek-v4-pro",
+          systemPrompt,
+          messages
+          // no tools
+        );
+      });
+
+      if (llmResponse.content) {
+        done = true;
+        finalResponseText = llmResponse.content;
+        modelUsed = "deepseek-v4-pro";
+        iterations = 1;
+
+        await step.run("save-response", async () => {
+          logger.info("Reasoning path finished. Saving response to DB.");
+          await saveMessage(dbThreadId, "assistant", finalResponseText);
+        });
+      } else {
+        // Fall through to agentic path if DeepSeek returned empty
+        logger.warn("DeepSeek returned empty content; falling back to agentic Kimi loop");
+      }
+    }
+
+    // 3b. Agentic path (Kimi K3 + tools + skills)
     while (!done && iterations < 10) {
       iterations++;
+      modelUsed = "kimi-k3";
 
       const llmResponse = await step.run(`think-${iterations}`, async () => {
-        logger.info(`Iteration ${iterations}: Calling LLM...`);
+        logger.info(`Iteration ${iterations}: Calling Kimi K3 (agentic)...`);
         return await callLLM("kimi-k3", systemPrompt, messages, agentTools);
       });
 
@@ -97,7 +141,9 @@ export const handleAgentTask = inngest.createFunction(
                 if (!result.success) {
                   return `Error: ${result.stderr || result.error_type || "execution failed"}\nstdout: ${result.stdout || ""}${fileSummary}${timing}`;
                 }
-                const errPart = result.stderr ? `\nstderr: ${result.stderr}` : "";
+                const errPart = result.stderr
+                  ? `\nstderr: ${result.stderr}`
+                  : "";
                 return `Success:\n${result.stdout || "(no stdout)"}${errPart}${fileSummary}${timing}`;
               }
 
@@ -142,7 +188,7 @@ export const handleAgentTask = inngest.createFunction(
     if (triggerSource === "slack" && channel) {
       await step.run("reply-slack", async () => {
         logger.info(
-          `Posting reply to Slack channel=${channel} thread_ts=${slackThreadTs}`
+          `Posting reply to Slack channel=${channel} thread_ts=${slackThreadTs} model=${modelUsed}`
         );
         await getSlack().chat.postMessage({
           channel,
@@ -157,12 +203,13 @@ export const handleAgentTask = inngest.createFunction(
       response: finalResponseText,
       iterations,
       dbThreadId,
+      model: modelUsed,
     };
   }
 );
 
-export { callLLM } from "./llm/router";
-export type { LLMMessage } from "./llm/router";
+export { callLLM, selectModel } from "./llm/router";
+export type { LLMMessage, ModelId } from "./llm/router";
 export { agentTools } from "./tools/definitions";
 export { executeCodeInSandbox } from "./modal/client";
 export type {
@@ -177,3 +224,11 @@ export {
   saveMessage,
 } from "./memory";
 export { getSupabase, getSlack, supabase, slack } from "./clients";
+export {
+  loadSkillPrompts,
+  listSkills,
+  prefersReasoningModel,
+  buildBaseSystemPrompt,
+} from "./skills/registry";
+export { SKILL_CATALOG } from "./skills/catalog";
+export type { SkillId, SkillDefinition } from "./skills/catalog";

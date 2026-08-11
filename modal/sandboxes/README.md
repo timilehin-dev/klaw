@@ -12,6 +12,7 @@ High-memory, pre-provisioned Python environment used by the `execute_code` agent
 | CPU | 8 cores |
 | Timeout | 10 minutes |
 | Scratch disk | 100 GiB ephemeral |
+| Workspace | `/mnt/data` (cwd) |
 | Plot backend | `Agg` (headless) |
 
 All dependencies are **baked into the image** at build time. Agent code should `import` packages — never `pip install` at runtime.

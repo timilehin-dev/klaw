@@ -10,7 +10,9 @@
     "./tools/definitions": "./tools/definitions.ts",
     "./modal/client": "./modal/client.ts",
     "./clients": "./clients.ts",
-    "./memory": "./memory.ts"
+    "./memory": "./memory.ts",
+    "./skills/registry": "./skills/registry.ts",
+    "./skills/catalog": "./skills/catalog.ts"
   },
   "dependencies": {
     "@slack/web-api": "^7.19.0",

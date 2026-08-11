@@ -28,7 +28,8 @@ CPU_CORES = 8.0
 TIMEOUT_SEC = 600
 EPHEMERAL_DISK_MIB = 100 * 1024  # 100 GiB scratch
 
-WORK_ROOT = "/tmp/klaw_workspace"
+# Skills write artifacts under /mnt/data (also process cwd during exec)
+WORK_ROOT = "/mnt/data"
 MAX_STDOUT_CHARS = 250_000
 MAX_STDERR_CHARS = 100_000
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB per returned file
@@ -137,6 +138,7 @@ PIP_PACKAGES = [
     "tqdm",
     "tenacity",
     "sqlalchemy",
+    "psycopg2-binary",
 ]
 
 app = modal.App(APP_NAME)
