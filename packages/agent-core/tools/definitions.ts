@@ -135,22 +135,67 @@ export const agentTools = [
   {
     type: "function",
     function: {
-      name: "memory_create_entity",
+      name: "create_memory",
       description:
-        "Create or update a long-lived memory entity (person, project, tool, concept) in the workspace knowledge graph.",
+        "Store a fact or entity in long-term memory. Use when you learn something important about the user's business, team, or projects.",
       parameters: {
         type: "object",
         properties: {
-          name: { type: "string", description: "Entity name (unique per workspace)." },
+          entity_name: {
+            type: "string",
+            description:
+              "Entity name (e.g. 'John Smith', 'Project Apollo', 'Stripe API').",
+          },
           entity_type: {
             type: "string",
-            enum: ["person", "project", "tool", "concept"],
-            description: "Entity category.",
+            description:
+              "Type: person, project, tool, concept, company.",
           },
           observations: {
             type: "array",
             items: { type: "string" },
-            description: "Optional initial observation strings.",
+            description: "List of facts/observations about this entity.",
+          },
+        },
+        required: ["entity_name", "entity_type", "observations"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_memory",
+      description:
+        "Search long-term memory for facts about a topic, person, or project.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "What to search for in memory.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory_create_entity",
+      description:
+        "Alias of create_memory with optional observations. Creates/updates a graph entity.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          entity_type: {
+            type: "string",
+            enum: ["person", "project", "tool", "concept", "company"],
+          },
+          observations: {
+            type: "array",
+            items: { type: "string" },
           },
         },
         required: ["name", "entity_type"],
@@ -162,7 +207,7 @@ export const agentTools = [
     function: {
       name: "memory_add_observation",
       description:
-        "Append a durable observation to an existing memory entity (creates the entity if missing).",
+        "Append a durable observation to an existing memory entity (creates it if missing).",
       parameters: {
         type: "object",
         properties: {
@@ -194,12 +239,11 @@ export const agentTools = [
     type: "function",
     function: {
       name: "memory_search",
-      description:
-        "Search the workspace memory graph for entities and relations matching a query.",
+      description: "Alias of search_memory for graph search.",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Search text (name, type, observation)." },
+          query: { type: "string" },
         },
         required: ["query"],
       },

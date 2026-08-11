@@ -16,6 +16,7 @@ import {
   saveMessage,
   loadConstraints,
   loadMemoryContext,
+  loadRelevantMemories,
   createMemoryEntity,
   addObservation,
   createMemoryRelation,
@@ -111,12 +112,14 @@ export const handleAgentTask = inngest.createFunction(
       const skillsContext = loadSkillPrompts();
       const constraintsContext = await loadConstraints(workspace);
       const memoryContext = await loadMemoryContext(workspace);
+      const relevantMemories = await loadRelevantMemories(workspace, message);
       const prompt =
         buildBaseSystemPrompt() +
         skillsContext +
         constraintsContext +
         memoryContext +
-        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions. Use web_search (Tavily) for research; browser tools for interactive sites. Persist durable facts with memory_* tools. Use schedule_task for recurring proactive work (UTC cron).";
+        relevantMemories +
+        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions. Use web_search (Tavily) for research; browser tools for interactive sites. When you learn durable facts, USE create_memory. When asked about past facts, USE search_memory first. Use schedule_task for recurring proactive work (UTC cron).";
       await appendAgentLog(dbThreadId, "load-context", "completed");
       return prompt;
     });
@@ -217,24 +220,34 @@ export const handleAgentTask = inngest.createFunction(
             continue;
           }
 
-          // --- MEMORY GRAPH ---
-          if (toolName === "memory_create_entity") {
+          // --- MEMORY GRAPH (create_memory / search_memory + aliases) ---
+          if (
+            toolName === "create_memory" ||
+            toolName === "memory_create_entity"
+          ) {
+            const name = String(
+              toolArgs.entity_name || toolArgs.name || ""
+            );
+            const entityType = String(
+              toolArgs.entity_type || "concept"
+            );
+            const observations = Array.isArray(toolArgs.observations)
+              ? toolArgs.observations.map(String)
+              : [];
             const out = await step.run(`memory-entity-${tc.id}`, async () => {
               await createMemoryEntity(
                 workspace,
-                String(toolArgs.name),
-                String(toolArgs.entity_type || "concept"),
-                Array.isArray(toolArgs.observations)
-                  ? toolArgs.observations.map(String)
-                  : []
+                name,
+                entityType,
+                observations
               );
               await appendAgentLog(
                 dbThreadId,
-                "memory_create_entity",
+                "create_memory",
                 "completed",
-                toolArgs.name
+                name
               );
-              return `Memory entity saved: ${toolArgs.name}`;
+              return `Memory stored: ${name} (${entityType})`;
             });
             messages.push({
               role: "tool",
@@ -290,7 +303,10 @@ export const handleAgentTask = inngest.createFunction(
             continue;
           }
 
-          if (toolName === "memory_search") {
+          if (
+            toolName === "search_memory" ||
+            toolName === "memory_search"
+          ) {
             const out = await step.run(`memory-search-${tc.id}`, async () => {
               const r = await searchMemory(
                 workspace,
@@ -298,7 +314,7 @@ export const handleAgentTask = inngest.createFunction(
               );
               await appendAgentLog(
                 dbThreadId,
-                "memory_search",
+                "search_memory",
                 "completed",
                 toolArgs.query
               );
@@ -679,19 +695,24 @@ export const handleAgentTask = inngest.createFunction(
       });
     }
 
+    const replyChannel =
+      channel || process.env.DEFAULT_SLACK_CHANNEL || null;
+
     if (
       (triggerSource === "slack" || triggerSource === "cron") &&
-      channel
+      replyChannel
     ) {
       await step.run("reply-slack", async () => {
         logger.info(
-          `Slack reply channel=${channel} thread_ts=${slackThreadTs || "n/a"} model=${modelUsed} source=${triggerSource}`
+          `Slack reply channel=${replyChannel} thread_ts=${slackThreadTs || "n/a"} model=${modelUsed} source=${triggerSource}`
         );
         const client =
           (await getWorkspaceSlackClient(workspace)) || getSlack();
         await client.chat.postMessage({
-          channel,
-          ...(slackThreadTs ? { thread_ts: slackThreadTs } : {}),
+          channel: replyChannel,
+          ...(triggerSource === "slack" && slackThreadTs
+            ? { thread_ts: slackThreadTs }
+            : {}),
           text: finalResponseText,
         });
         await appendAgentLog(dbThreadId, "reply-slack", "completed");
@@ -736,6 +757,7 @@ export {
   saveMessage,
   loadConstraints,
   loadMemoryContext,
+  loadRelevantMemories,
   createMemoryEntity,
   addObservation,
   createMemoryRelation,

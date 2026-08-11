@@ -245,52 +245,112 @@ export async function searchMemory(
   query: string
 ): Promise<string> {
   const supabase = getSupabase();
-  const q = (query || "").toLowerCase();
+  const q = (query || "").trim();
+  const qLower = q.toLowerCase();
 
-  const { data: entities } = await supabase
+  // Prefer DB ilike when query is a single token; always fall back to client filter
+  // (covers observations JSON which is hard to ilike cleanly)
+  let entitiesQuery = supabase
     .from("memory_entities")
     .select("name, entity_type, observations")
     .eq("workspace_id", workspaceId)
     .limit(100);
 
-  const { data: relations } = await supabase
+  if (q && !q.includes(" ")) {
+    entitiesQuery = entitiesQuery.or(
+      `name.ilike.%${q}%,entity_type.ilike.%${q}%`
+    );
+  }
+
+  const { data: entitiesRaw } = await entitiesQuery;
+
+  let relationsQuery = supabase
     .from("memory_relations")
     .select("source_entity, target_entity, relation_type")
     .eq("workspace_id", workspaceId)
     .limit(100);
 
-  const matchedEntities = (entities || []).filter((e) => {
+  if (q && !q.includes(" ")) {
+    relationsQuery = relationsQuery.or(
+      `source_entity.ilike.%${q}%,target_entity.ilike.%${q}%`
+    );
+  }
+
+  const { data: relationsRaw } = await relationsQuery;
+
+  const matchedEntities = (entitiesRaw || []).filter((e) => {
+    if (!qLower) return true;
     const obs = Array.isArray(e.observations)
       ? e.observations.join(" ")
       : "";
     const hay = `${e.name} ${e.entity_type} ${obs}`.toLowerCase();
-    return !q || hay.includes(q);
+    return hay.includes(qLower);
   });
 
-  const matchedRelations = (relations || []).filter((r) => {
+  const matchedRelations = (relationsRaw || []).filter((r) => {
+    if (!qLower) return true;
     const hay =
       `${r.source_entity} ${r.relation_type} ${r.target_entity}`.toLowerCase();
-    return !q || hay.includes(q);
+    return hay.includes(qLower);
   });
 
   if (matchedEntities.length === 0 && matchedRelations.length === 0) {
-    return "No matching memory found.";
+    return "No relevant memories found.";
   }
 
-  const lines: string[] = ["# Memory search results"];
-  for (const e of matchedEntities.slice(0, 20)) {
-    const obs = Array.isArray(e.observations)
-      ? e.observations.map((o: string) => `  - ${o}`).join("\n")
-      : "";
-    lines.push(`- Entity: ${e.name} (${e.entity_type})`);
-    if (obs) lines.push(obs);
+  const lines: string[] = ["Memory Search Results:", ""];
+  if (matchedEntities.length > 0) {
+    lines.push("Entities:");
+    for (const e of matchedEntities.slice(0, 20)) {
+      const obs = Array.isArray(e.observations)
+        ? e.observations.join("; ")
+        : "";
+      lines.push(`- ${e.name} (${e.entity_type})`);
+      if (obs) lines.push(`  Observations: ${obs}`);
+    }
   }
-  for (const r of matchedRelations.slice(0, 20)) {
-    lines.push(
-      `- Relation: ${r.source_entity} —[${r.relation_type}]→ ${r.target_entity}`
-    );
+  if (matchedRelations.length > 0) {
+    lines.push("", "Relations:");
+    for (const r of matchedRelations.slice(0, 20)) {
+      lines.push(
+        `- ${r.source_entity} ${r.relation_type} ${r.target_entity}`
+      );
+    }
   }
   return lines.join("\n");
+}
+
+/**
+ * Keyword-based memory pull for the system prompt (Phase 9 script).
+ * Checks up to 5 words from the user message (length > 3).
+ */
+export async function loadRelevantMemories(
+  workspaceId: string,
+  userMessage: string
+): Promise<string> {
+  const words = (userMessage || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z0-9_-]/gi, ""))
+    .filter((w) => w.length > 3);
+
+  if (words.length === 0) return "";
+
+  const seen = new Set<string>();
+  let allMemories = "";
+
+  for (const word of words.slice(0, 5)) {
+    if (seen.has(word)) continue;
+    seen.add(word);
+    const result = await searchMemory(workspaceId, word);
+    if (result !== "No relevant memories found.") {
+      allMemories += result + "\n";
+    }
+  }
+
+  return allMemories
+    ? `\n\n# RELEVANT MEMORIES\nThe following are things you remember about this workspace:\n${allMemories}`
+    : "";
 }
 
 /** Compact memory snapshot for system prompt */
