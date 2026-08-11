@@ -8,6 +8,8 @@
     ".": "./index.ts",
     "./llm/router": "./llm/router.ts",
     "./tools/definitions": "./tools/definitions.ts",
+    "./tools/tavily": "./tools/tavily.ts",
+    "./tools/browser": "./tools/browser.ts",
     "./modal/client": "./modal/client.ts",
     "./clients": "./clients.ts",
     "./memory": "./memory.ts",

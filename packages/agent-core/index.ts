@@ -8,6 +8,8 @@ import {
 } from "./llm/router";
 import { agentTools } from "./tools/definitions";
 import { executeCodeInSandbox } from "./modal/client";
+import { tavilySearch } from "./tools/tavily";
+import { runBrowserAction } from "./tools/browser";
 import {
   ensureThreadExists,
   loadHistory,
@@ -96,7 +98,7 @@ export const handleAgentTask = inngest.createFunction(
         buildBaseSystemPrompt() +
         skillsContext +
         constraintsContext +
-        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions.";
+        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions. Use web_search (Tavily) for research; use browser_action for interactive/JS sites.";
       await appendAgentLog(dbThreadId, "load-context", "completed");
       return prompt;
     });
@@ -185,11 +187,7 @@ export const handleAgentTask = inngest.createFunction(
 
         for (const tc of llmResponse.tool_calls) {
           const toolName = tc.function?.name as string;
-          let toolArgs: {
-            code?: string;
-            dependencies?: string[];
-            requires_approval?: boolean;
-          } = {};
+          let toolArgs: Record<string, any> = {};
           try {
             toolArgs = JSON.parse(tc.function?.arguments || "{}");
           } catch {
@@ -201,6 +199,75 @@ export const handleAgentTask = inngest.createFunction(
             continue;
           }
 
+          // --- WEB SEARCH (Tavily) ---
+          if (toolName === "web_search") {
+            const searchResult = await step.run(
+              `web-search-${iterations}-${tc.id}`,
+              async () => {
+                await appendAgentLog(dbThreadId, "web_search", "running");
+                const r = await tavilySearch(String(toolArgs.query || ""), {
+                  maxResults: Number(toolArgs.max_results) || 5,
+                });
+                await appendAgentLog(
+                  dbThreadId,
+                  "web_search",
+                  r.success ? "completed" : "failed",
+                  r.success ? undefined : r.error
+                );
+                return r;
+              }
+            );
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: searchResult.success
+                ? searchResult.summary
+                : `Search failed: ${searchResult.error}`,
+            });
+            continue;
+          }
+
+          // --- BROWSER (Playwright Modal) ---
+          if (toolName === "browser_action") {
+            const browserResult = await step.run(
+              `browser-${iterations}-${tc.id}`,
+              async () => {
+                await appendAgentLog(
+                  dbThreadId,
+                  `browser_${toolArgs.action || "action"}`,
+                  "running"
+                );
+                const r = await runBrowserAction({
+                  action: toolArgs.action,
+                  url: toolArgs.url,
+                  selector: toolArgs.selector,
+                  text: toolArgs.text,
+                  wait_ms: toolArgs.wait_ms,
+                });
+                await appendAgentLog(
+                  dbThreadId,
+                  `browser_${toolArgs.action || "action"}`,
+                  r.success ? "completed" : "failed",
+                  r.success ? r.title || r.url : r.error
+                );
+                return r;
+              }
+            );
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: browserResult.success
+                ? `URL: ${browserResult.url || toolArgs.url}\nTitle: ${browserResult.title || ""}\n\n${browserResult.content || ""}${
+                    browserResult.screenshot_base64
+                      ? "\n[screenshot captured — base64 omitted from chat]"
+                      : ""
+                  }`
+                : `Browser action failed: ${browserResult.error}`,
+            });
+            continue;
+          }
+
+          // --- CODE EXECUTION ---
           if (toolName !== "execute_code") {
             messages.push({
               role: "tool",
@@ -210,7 +277,7 @@ export const handleAgentTask = inngest.createFunction(
             continue;
           }
 
-          let codeToRun = toolArgs.code || "";
+          let codeToRun = String(toolArgs.code || "");
           const dependencies = Array.isArray(toolArgs.dependencies)
             ? toolArgs.dependencies
             : [];
@@ -294,7 +361,6 @@ export const handleAgentTask = inngest.createFunction(
               );
             });
 
-            // Durable pause (up to 24h) for approval/resolved matching this tool call
             const approvalEvent = await step.waitForEvent(
               `wait-approval-${tc.id}`,
               {
@@ -325,7 +391,12 @@ export const handleAgentTask = inngest.createFunction(
               continue;
             }
 
-            await appendAgentLog(dbThreadId, "approval-granted", "completed", tc.id);
+            await appendAgentLog(
+              dbThreadId,
+              "approval-granted",
+              "completed",
+              tc.id
+            );
           }
 
           // --- EXECUTION + SELF-HEAL ---
@@ -462,6 +533,14 @@ export type {
   SandboxFile,
   ExecuteCodeOptions,
 } from "./modal/client";
+export { tavilySearch } from "./tools/tavily";
+export type { TavilyResult } from "./tools/tavily";
+export { runBrowserAction } from "./tools/browser";
+export type {
+  BrowserActionInput,
+  BrowserActionResult,
+  BrowserAction,
+} from "./tools/browser";
 export {
   ensureWorkspace,
   ensureThreadExists,
