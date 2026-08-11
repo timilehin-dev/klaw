@@ -1,9 +1,10 @@
 import { serve } from "inngest/next";
-import { inngest } from "@/lib/inngest/client";
+import { inngest, handleAgentTask } from "@klaw/core";
 
+// Serves the agent brain functions to the Inngest Dev Server / Cloud
 export const { GET, POST, PUT } = serve({
   client: inngest,
   functions: [
-    // TODO: Import and pass agent functions here
+    handleAgentTask,
   ],
 });

@@ -4,7 +4,12 @@
   "private": true,
   "main": "./index.ts",
   "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./llm/router": "./llm/router.ts"
+  },
   "dependencies": {
-    "inngest": "^3.22.0"
+    "inngest": "^3.22.0",
+    "zod": "^3.25.76"
   }
 }
