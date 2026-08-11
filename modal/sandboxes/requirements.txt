@@ -1,0 +1,73 @@
+# Reference list of packages baked into the Klaw Modal sandbox image.
+# DO NOT install these at runtime in agent code — they are already global
+# in the container via modal/sandboxes/execute_code.py Image.pip_install().
+#
+# Keep this file in sync when you change PIP_PACKAGES in execute_code.py.
+
+# HTTP API
+fastapi[standard]
+
+# HTTP / scraping
+requests
+httpx
+aiohttp
+urllib3
+beautifulsoup4
+lxml
+html5lib
+feedparser
+tldextract
+
+# Data
+numpy
+pandas
+scipy
+scikit-learn
+statsmodels
+pyarrow
+polars
+duckdb
+openpyxl
+xlsxwriter
+xlrd
+tabulate
+
+# Viz
+matplotlib
+seaborn
+plotly
+pillow
+
+# Documents
+python-docx
+python-pptx
+reportlab
+fpdf2
+PyMuPDF
+pdfplumber
+pypdf
+pdf2image
+pytesseract
+markdown
+jinja2
+
+# Images
+opencv-python-headless
+
+# Math
+sympy
+mpmath
+
+# Utils
+pydantic
+jsonschema
+orjson
+pyyaml
+python-dateutil
+pytz
+chardet
+python-magic
+regex
+tqdm
+tenacity
+sqlalchemy

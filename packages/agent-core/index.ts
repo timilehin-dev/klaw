@@ -17,7 +17,7 @@ export const handleAgentTask = inngest.createFunction(
     // 1. Load System Prompt
     const systemPrompt = await step.run("load-context", async () => {
       logger.info(`Loading context for thread ${threadId} (source: ${triggerSource})`);
-      return `You are an expert AI engineer assistant for Klaw. You have access to a tool called 'execute_code' which runs Python 3.11 in a secure sandbox with pandas, requests, and matplotlib installed. Use it for any calculations, data analysis, or file generation.`;
+      return `You are an expert AI engineer assistant for Klaw. You have access to a tool called 'execute_code' which runs Python 3.11 in a secure 32GB Modal sandbox. Libraries are preinstalled globally (numpy, pandas, polars, duckdb, scipy, scikit-learn, matplotlib, seaborn, plotly, python-docx, python-pptx, openpyxl, reportlab, PyMuPDF, pdfplumber, Pillow, opencv, pytesseract, requests, httpx, beautifulsoup4, sympy, and more) — never pip install. Write files to the working directory; they are returned. Use the tool for calculations, data analysis, document generation, plotting, or scraping.`;
     });
 
     // 2. Initialize messages
@@ -55,12 +55,24 @@ export const handleAgentTask = inngest.createFunction(
               if (toolName === "execute_code") {
                 // Call Modal Sandbox client (lives in @klaw/core — not apps/web)
                 const result = await executeCodeInSandbox(toolArgs.code);
-                return result.stderr
-                  ? `Error: ${result.stderr}`
-                  : `Success: ${result.stdout}`;
+                const fileSummary =
+                  result.files && result.files.length > 0
+                    ? `\nFiles written: ${result.files
+                        .map((f) => `${f.path} (${f.size} bytes, ${f.media_type || "unknown"})`)
+                        .join(", ")}`
+                    : "";
+                const timing =
+                  result.duration_ms != null ? `\nDuration: ${result.duration_ms}ms` : "";
+
+                if (!result.success) {
+                  return `Error: ${result.stderr || result.error_type || "execution failed"}\nstdout: ${result.stdout || ""}${fileSummary}${timing}`;
+                }
+                // Prefer stdout; still surface stderr warnings if present
+                const errPart = result.stderr ? `\nstderr: ${result.stderr}` : "";
+                return `Success:\n${result.stdout || "(no stdout)"}${errPart}${fileSummary}${timing}`;
               }
 
-              return `Error: Unknown tool ${toolName}`;
+              return "Tool not found.";
             }
           );
 
@@ -101,4 +113,4 @@ export { callLLM } from "./llm/router";
 export type { LLMMessage } from "./llm/router";
 export { agentTools } from "./tools/definitions";
 export { executeCodeInSandbox } from "./modal/client";
-export type { SandboxResult } from "./modal/client";
+export type { SandboxResult, SandboxFile, ExecuteCodeOptions } from "./modal/client";
