@@ -17,14 +17,27 @@
     "./guardrails": "./guardrails.ts",
     "./cron": "./cron.ts",
     "./workspace-tokens": "./workspace-tokens.ts",
+    "./mcp/bridge": "./mcp/bridge.ts",
+    "./mcp/registry": "./mcp/registry.ts",
+    "./slack/verify": "./slack/verify.ts",
+    "./artifacts": "./artifacts.ts",
     "./skills/registry": "./skills/registry.ts",
     "./skills/catalog": "./skills/catalog.ts"
   },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "dependencies": {
     "@klaw/database": "*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@slack/web-api": "^7.19.0",
     "@supabase/supabase-js": "^2.112.3",
     "inngest": "^3.22.0",
     "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "vitest": "^4.1.10"
   }
 }

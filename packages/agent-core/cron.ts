@@ -4,7 +4,7 @@ import { getWorkspaceSlackClient } from "./workspace-tokens";
 
 /**
  * Minimal cron matcher for common 5-field expressions.
- * Supports: "*", ranges (1-5), lists (1,3,5), steps (*/5), and numbers.
+ * Supports: "*", ranges (1-5), lists (1,3,5), steps (star/N), and numbers.
  * Not a full cron engine — good enough for agentic schedules.
  */
 function fieldMatches(field: string, value: number): boolean {

@@ -284,4 +284,51 @@ export const agentTools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "mcp_list_servers",
+      description:
+        "List curated free/public MCP servers available to Klaw (Time, Sequential Thinking, Fetch, Filesystem, etc.).",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mcp_list_tools",
+      description:
+        "List tools exposed by a free MCP server id (e.g. time, sequential-thinking, echo, fetch).",
+      parameters: {
+        type: "object",
+        properties: {
+          server_id: {
+            type: "string",
+            description: "MCP server id from mcp_list_servers.",
+          },
+        },
+        required: ["server_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mcp_call_tool",
+      description:
+        "Call a tool on a free MCP server. Prefer in-process servers (time, sequential-thinking, echo) which need no keys.",
+      parameters: {
+        type: "object",
+        properties: {
+          server_id: { type: "string" },
+          tool_name: { type: "string" },
+          arguments: {
+            type: "object",
+            description: "Tool arguments object.",
+          },
+        },
+        required: ["server_id", "tool_name"],
+      },
+    },
+  },
 ];

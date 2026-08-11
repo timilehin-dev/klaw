@@ -1,18 +1,35 @@
 import { NextResponse } from "next/server";
-import { getSupabase, inngest } from "@klaw/core";
+import { getSupabase, inngest, verifySlackSignature } from "@klaw/core";
 
 /**
  * Slack Interactivity endpoint (button clicks for HITL approvals).
  * Configure Request URL: https://<host>/api/slack/interactions
- *
- * Note: Slack sends application/x-www-form-urlencoded with a `payload` JSON field.
- * Action type for Block Kit buttons is `block_actions` (not interactive_action).
  */
 export async function POST(req: Request) {
   try {
-    const formData = await req.formData();
-    const payloadRaw = formData.get("payload");
-    if (!payloadRaw || typeof payloadRaw !== "string") {
+    const rawBody = await req.text();
+    const signingSecret = process.env.SLACK_SIGNING_SECRET || "";
+    const signature = req.headers.get("x-slack-signature") || "";
+    const timestamp = req.headers.get("x-slack-request-timestamp") || "";
+
+    if (process.env.SLACK_SKIP_VERIFY !== "1") {
+      const verified = verifySlackSignature({
+        signingSecret,
+        signature,
+        timestamp,
+        rawBody,
+      });
+      if (!verified.ok) {
+        return NextResponse.json(
+          { error: "invalid_slack_signature", reason: verified.reason },
+          { status: 401 }
+        );
+      }
+    }
+
+    const params = new URLSearchParams(rawBody);
+    const payloadRaw = params.get("payload");
+    if (!payloadRaw) {
       return NextResponse.json({ error: "No payload" }, { status: 400 });
     }
 
@@ -27,8 +44,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true });
     }
 
-    // value carries JSON: { toolCallId, threadId, decision }
-    // action_id is approve_code | deny_code
     let meta: {
       toolCallId?: string;
       threadId?: string;

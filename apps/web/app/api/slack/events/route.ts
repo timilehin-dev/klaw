@@ -1,9 +1,35 @@
 import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis/client";
-import { inngest } from "@klaw/core";
+import { inngest, verifySlackSignature } from "@klaw/core";
 
 export async function POST(req: Request) {
-  const body = await req.json();
+  const rawBody = await req.text();
+  const signingSecret = process.env.SLACK_SIGNING_SECRET || "";
+  const signature = req.headers.get("x-slack-signature") || "";
+  const timestamp = req.headers.get("x-slack-request-timestamp") || "";
+
+  // Skip verify only in explicit local bypass (tests set SLACK_SKIP_VERIFY=1)
+  if (process.env.SLACK_SKIP_VERIFY !== "1") {
+    const verified = verifySlackSignature({
+      signingSecret,
+      signature,
+      timestamp,
+      rawBody,
+    });
+    if (!verified.ok) {
+      return NextResponse.json(
+        { error: "invalid_slack_signature", reason: verified.reason },
+        { status: 401 }
+      );
+    }
+  }
+
+  let body: any;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return NextResponse.json({ error: "invalid_json" }, { status: 400 });
+  }
 
   // 1. Slack URL verification challenge
   if (body.type === "url_verification") {
@@ -13,32 +39,33 @@ export async function POST(req: Request) {
   // 2. Deduplication using Upstash Redis
   const eventId = body.event_id;
   if (eventId) {
-    const seen = await redis.sadd("slack:processed_events", eventId);
-    if (!seen) {
-      // Already processed (Slack retries if we don't ack in 3s)
-      return NextResponse.json({ ok: true, deduped: true });
+    try {
+      const seen = await redis.sadd("slack:processed_events", eventId);
+      if (!seen) {
+        return NextResponse.json({ ok: true, deduped: true });
+      }
+    } catch {
+      // Redis optional for local dev
     }
   }
 
-  // 3. ACK path — do not await LLM work here (Inngest handles duration)
-
-  // 4. Extract event data
+  // 3. Extract event data — heavy work via Inngest
   const event = body.event;
   if (event?.type === "app_mention" || event?.type === "message") {
-    // Ignore bot messages / subtypes to prevent infinite loops
     if (event.bot_id || event.subtype) {
       return NextResponse.json({ ok: true });
     }
 
-    // Slack team id for workspace mapping (body.team_id on Events API)
     const workspaceId =
-      body.team_id || event.team || body.authorizations?.[0]?.team_id || "default";
+      body.team_id ||
+      event.team ||
+      body.authorizations?.[0]?.team_id ||
+      "default";
 
-    // 5. Fire Inngest event — heavy work runs in background
     await inngest.send({
       name: "task/received",
       data: {
-        threadId: event.thread_ts || event.ts, // Slack thread timestamp
+        threadId: event.thread_ts || event.ts,
         message: event.text,
         triggerSource: "slack",
         channel: event.channel,

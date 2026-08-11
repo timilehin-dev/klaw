@@ -30,6 +30,17 @@ import { createCronDispatcher } from "./cron";
 import { appendAgentLog } from "./logging";
 import { requiresHumanApproval } from "./guardrails";
 import {
+  callMcpTool,
+  describeFreeMcpRegistry,
+  listMcpTools,
+} from "./mcp/bridge";
+import { persistSandboxArtifacts } from "./artifacts-persist";
+import {
+  appendAgentRunStep,
+  finishAgentRun,
+  startAgentRun,
+} from "./runs";
+import {
   buildBaseSystemPrompt,
   loadSkillPrompts,
   prefersReasoningModel,
@@ -119,7 +130,7 @@ export const handleAgentTask = inngest.createFunction(
         constraintsContext +
         memoryContext +
         relevantMemories +
-        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions. Use web_search (Tavily) for research; browser tools for interactive sites. When you learn durable facts, USE create_memory. When asked about past facts, USE search_memory first. Use schedule_task for recurring proactive work (UTC cron).";
+        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions. Use web_search (Tavily) for research; browser tools for interactive sites. Use mcp_list_servers / mcp_list_tools / mcp_call_tool for free public MCP tools (start with server_id=time). When you learn durable facts, USE create_memory. When asked about past facts, USE search_memory first. Use schedule_task for recurring proactive work (UTC cron).";
       await appendAgentLog(dbThreadId, "load-context", "completed");
       return prompt;
     });
@@ -133,6 +144,13 @@ export const handleAgentTask = inngest.createFunction(
         `${h.length} messages`
       );
       return h;
+    });
+
+    const runId = await step.run("start-agent-run", async () => {
+      return await startAgentRun({
+        threadId: dbThreadId,
+        trigger: triggerSource || "unknown",
+      });
     });
 
     const messages: LLMMessage[] = [...history];
@@ -216,6 +234,92 @@ export const handleAgentTask = inngest.createFunction(
               role: "tool",
               tool_call_id: tc.id,
               content: "Error: invalid tool arguments JSON",
+            });
+            continue;
+          }
+
+          // --- FREE PUBLIC MCP ---
+          if (toolName === "mcp_list_servers") {
+            const out = await step.run(`mcp-list-servers-${tc.id}`, async () => {
+              await appendAgentLog(dbThreadId, "mcp_list_servers", "completed");
+              await appendAgentRunStep(runId, {
+                name: "mcp_list_servers",
+                status: "completed",
+                at: new Date().toISOString(),
+              });
+              return describeFreeMcpRegistry();
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
+            });
+            continue;
+          }
+
+          if (toolName === "mcp_list_tools") {
+            const out = await step.run(`mcp-list-tools-${tc.id}`, async () => {
+              const serverId = String(toolArgs.server_id || "");
+              const listed = await listMcpTools(serverId);
+              await appendAgentLog(
+                dbThreadId,
+                "mcp_list_tools",
+                listed.success ? "completed" : "failed",
+                serverId
+              );
+              await appendAgentRunStep(runId, {
+                name: `mcp_list_tools:${serverId}`,
+                status: listed.success ? "completed" : "failed",
+                at: new Date().toISOString(),
+                detail: listed.error,
+              });
+              if (!listed.success) {
+                return `Failed to list tools: ${listed.error}`;
+              }
+              return listed.tools
+                .map(
+                  (t) =>
+                    `- ${t.name}: ${t.description}\n  schema: ${JSON.stringify(t.inputSchema)}`
+                )
+                .join("\n");
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
+            });
+            continue;
+          }
+
+          if (toolName === "mcp_call_tool") {
+            const out = await step.run(`mcp-call-${tc.id}`, async () => {
+              const serverId = String(toolArgs.server_id || "");
+              const name = String(toolArgs.tool_name || "");
+              const args =
+                toolArgs.arguments && typeof toolArgs.arguments === "object"
+                  ? (toolArgs.arguments as Record<string, unknown>)
+                  : {};
+              const result = await callMcpTool(serverId, name, args);
+              await appendAgentLog(
+                dbThreadId,
+                "mcp_call_tool",
+                result.success ? "completed" : "failed",
+                `${serverId}.${name}`
+              );
+              await appendAgentRunStep(runId, {
+                name: `mcp_call:${serverId}.${name}`,
+                status: result.success ? "completed" : "failed",
+                at: new Date().toISOString(),
+                detail: result.error,
+              });
+              return result.success
+                ? result.text
+                : `MCP call failed: ${result.error}`;
+            });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: out,
             });
             continue;
           }
@@ -631,6 +735,32 @@ export const handleAgentTask = inngest.createFunction(
             if (execResult.success) {
               success = true;
               toolResultStr = formatExecResult(execResult);
+              // Persist sandbox files into Cabinet artifacts
+              if (execResult.files && execResult.files.length > 0) {
+                await step.run(
+                  `persist-artifacts-${iterations}-a${fixAttempts}-${tc.id}`,
+                  async () => {
+                    const n = await persistSandboxArtifacts(
+                      dbThreadId,
+                      execResult.files,
+                      { source: "execute_code", attempt: fixAttempts }
+                    );
+                    await appendAgentLog(
+                      dbThreadId,
+                      "persist-artifacts",
+                      "completed",
+                      `${n} file(s)`
+                    );
+                    await appendAgentRunStep(runId, {
+                      name: "persist-artifacts",
+                      status: "completed",
+                      at: new Date().toISOString(),
+                      detail: `${n} file(s)`,
+                    });
+                    return n;
+                  }
+                );
+              }
             } else if (fixAttempts < MAX_SELF_HEAL_FIXES) {
               logger.info(
                 `Code failed: ${execResult.stderr}. Asking DeepSeek to fix...`
@@ -723,12 +853,22 @@ export const handleAgentTask = inngest.createFunction(
       });
     }
 
+    await step.run("finish-agent-run", async () => {
+      await finishAgentRun(runId, "completed", {
+        name: "finish",
+        status: "completed",
+        at: new Date().toISOString(),
+        detail: `model=${modelUsed}; iterations=${iterations}`,
+      });
+    });
+
     return {
       success: true,
       response: finalResponseText,
       iterations,
       dbThreadId,
       model: modelUsed,
+      runId,
     };
   }
 );
@@ -775,6 +915,29 @@ export { cronMatches, createCronDispatcher } from "./cron";
 export { appendAgentLog } from "./logging";
 export type { AgentLogStatus } from "./logging";
 export { requiresHumanApproval, codeLooksDestructive } from "./guardrails";
+export {
+  callMcpTool,
+  listMcpTools,
+  describeFreeMcpRegistry,
+} from "./mcp/bridge";
+export {
+  FREE_MCP_REGISTRY,
+  getMcpServer,
+  listFreeMcpServers,
+  listZeroKeyMcpServers,
+} from "./mcp/registry";
+export {
+  mapSandboxFilesToArtifacts,
+  inferArtifactType,
+  buildDurableFilePath,
+} from "./artifacts";
+export { persistSandboxArtifacts } from "./artifacts-persist";
+export { verifySlackSignature, signSlackRequest } from "./slack/verify";
+export {
+  startAgentRun,
+  appendAgentRunStep,
+  finishAgentRun,
+} from "./runs";
 export {
   loadSkillPrompts,
   listSkills,

@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "test": "npm run test --workspace=@klaw/core"
   },
   "devDependencies": {
     "turbo": "^2.0.0"
