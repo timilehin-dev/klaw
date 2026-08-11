@@ -3,51 +3,51 @@ Klaw Modal Sandbox — secure, high-memory code execution for agent tool calling
 
 Design goals
 ------------
-1. **Fat image**: every common library the agent might need is preinstalled.
-   User/agent code must NOT run `pip install` at runtime.
-2. **32 GiB RAM / multi-core** for heavy data, docs, and plotting workloads.
-3. **Workspace I/O**: stage input files, execute, collect generated artifacts.
-4. **Stable HTTP API** for the TypeScript agent loop (`MODAL_EXECUTE_URL`).
+1. **Fat image**: common libraries preinstalled globally at image-build time.
+2. **32 GiB RAM / multi-core** for heavy data, docs, and plotting.
+3. **/mnt/data volume** for skill outputs (PDFs, CSVs, charts).
+4. **Optional dynamic deps**: rare packages via `dependencies` (allowlisted pip).
+5. **HTTP API** for the TypeScript agent loop (`MODAL_EXECUTE_URL`).
 
-Deploy (when you are ready — not automatic):
+Deploy (manual):
     modal deploy modal/sandboxes/execute_code.py
-
-Then set MODAL_EXECUTE_URL to the printed `execute_code` endpoint URL.
 """
 
 from __future__ import annotations
 
 import modal
+import re
 
 APP_NAME = "klaw-sandbox"
 PYTHON_VERSION = "3.11"
 
-# Resource profile (Modal memory is MiB)
 MEMORY_MIB = 32 * 1024  # 32 GiB
 CPU_CORES = 8.0
 TIMEOUT_SEC = 600
-EPHEMERAL_DISK_MIB = 100 * 1024  # 100 GiB scratch
+EPHEMERAL_DISK_MIB = 100 * 1024
 
-# Skills write artifacts under /mnt/data (also process cwd during exec)
 WORK_ROOT = "/mnt/data"
 MAX_STDOUT_CHARS = 250_000
 MAX_STDERR_CHARS = 100_000
-MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB per returned file
-MAX_TOTAL_FILE_BYTES = 60 * 1024 * 1024  # 60 MiB total artifacts
+MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_TOTAL_FILE_BYTES = 60 * 1024 * 1024
 MAX_RETURN_FILES = 32
+MAX_DYNAMIC_DEPS = 15
 
-# ---------------------------------------------------------------------------
-# System packages (apt) — available globally in the container
-# ---------------------------------------------------------------------------
+# pip package tokens only (name + optional version pin). Blocks shell metacharacters.
+_DEP_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._\-]*([<>=!~]=?[A-Za-z0-9._\*+\-]+)?$"
+)
+
 APT_PACKAGES = [
-    # Build / basics
     "build-essential",
     "curl",
     "wget",
     "git",
     "ca-certificates",
     "pkg-config",
-    # OCR / PDF / images
+    "libpq-dev",
+    "gcc",
     "tesseract-ocr",
     "tesseract-ocr-eng",
     "poppler-utils",
@@ -57,7 +57,6 @@ APT_PACKAGES = [
     "libsm6",
     "libxext6",
     "libxrender1",
-    # Fonts & rendering (docs / matplotlib)
     "fonts-dejavu-core",
     "fonts-liberation",
     "fonts-freefont-ttf",
@@ -66,20 +65,13 @@ APT_PACKAGES = [
     "libpangocairo-1.0-0",
     "libgdk-pixbuf-2.0-0",
     "shared-mime-info",
-    # Compression / archives
     "unzip",
     "zip",
     "xz-utils",
 ]
 
-# ---------------------------------------------------------------------------
-# Python packages — baked into the image (global site-packages)
-# Grouped for readability; all install at image-build time once.
-# ---------------------------------------------------------------------------
 PIP_PACKAGES = [
-    # HTTP API (Modal fastapi_endpoint)
     "fastapi[standard]",
-    # HTTP / scraping
     "requests",
     "httpx",
     "aiohttp",
@@ -89,7 +81,6 @@ PIP_PACKAGES = [
     "html5lib",
     "feedparser",
     "tldextract",
-    # Core data stack
     "numpy",
     "pandas",
     "scipy",
@@ -98,17 +89,14 @@ PIP_PACKAGES = [
     "pyarrow",
     "polars",
     "duckdb",
-    # Spreadsheets / tabular
     "openpyxl",
     "xlsxwriter",
     "xlrd",
     "tabulate",
-    # Visualization
     "matplotlib",
     "seaborn",
     "plotly",
     "pillow",
-    # Documents (aligns with skills/document-generation)
     "python-docx",
     "python-pptx",
     "reportlab",
@@ -120,12 +108,9 @@ PIP_PACKAGES = [
     "pytesseract",
     "markdown",
     "jinja2",
-    # Images / CV (headless)
     "opencv-python-headless",
-    # Math
     "sympy",
     "mpmath",
-    # Serialization / validation / utils
     "pydantic",
     "jsonschema",
     "orjson",
@@ -143,16 +128,17 @@ PIP_PACKAGES = [
 
 app = modal.App(APP_NAME)
 
+# Persistent outputs for agent-generated files (skills write here)
+output_vol = modal.Volume.from_name("klaw-agent-outputs", create_if_missing=True)
+
 image = (
     modal.Image.debian_slim(python_version=PYTHON_VERSION)
     .apt_install(*APT_PACKAGES)
     .pip_install(*PIP_PACKAGES)
     .env(
         {
-            # Headless plotting
             "MPLBACKEND": "Agg",
             "PYTHONUNBUFFERED": "1",
-            # Tesseract data path is usually default on Debian
             "KLAW_SANDBOX": "1",
             "KLAW_WORK_ROOT": WORK_ROOT,
         }
@@ -174,21 +160,80 @@ def _guess_media_type(name: str) -> str:
     return media or "application/octet-stream"
 
 
+def _sanitize_dependencies(raw: list | None) -> tuple[list[str], str | None]:
+    if not raw:
+        return [], None
+    if not isinstance(raw, list):
+        return [], "dependencies must be a list of package strings"
+    if len(raw) > MAX_DYNAMIC_DEPS:
+        return [], f"Too many dependencies (max {MAX_DYNAMIC_DEPS})"
+
+    cleaned: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            return [], f"Invalid dependency entry: {item!r}"
+        dep = item.strip()
+        if len(dep) > 120:
+            return [], f"Dependency too long: {dep[:40]}..."
+        if not _DEP_RE.match(dep):
+            return [], f"Rejected dependency (invalid name/pin): {dep}"
+        # Block obvious path / URL installs
+        lower = dep.lower()
+        if any(x in lower for x in ("://", "/", "\\", "..", "git+", "file:")):
+            return [], f"Rejected dependency (only PyPI pins allowed): {dep}"
+        cleaned.append(dep)
+    return cleaned, None
+
+
+def _install_dependencies(deps: list[str]) -> str | None:
+    """Install allowlisted packages. Returns error string or None."""
+    if not deps:
+        return None
+    import subprocess
+    import sys
+
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir", *deps],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        return None
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
+        return f"Failed to install dependencies {deps}: {err}"
+
+
+def _prepare_workspace() -> None:
+    """Ensure /mnt/data exists and is clean enough for isolated runs."""
+    import shutil
+    from pathlib import Path
+
+    work = Path(WORK_ROOT)
+    work.mkdir(parents=True, exist_ok=True)
+    for child in list(work.iterdir()):
+        # Keep volume metadata; wipe run artifacts for isolation
+        if child.name in {".modal", ".git"}:
+            continue
+        try:
+            if child.is_file() or child.is_symlink():
+                child.unlink(missing_ok=True)
+            elif child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+        except OSError:
+            pass
+
+
 def _run_user_code(
     code: str,
     *,
     input_files: dict[str, str] | None = None,
     timeout_seconds: int | None = None,
+    dependencies: list[str] | None = None,
 ) -> dict:
-    """
-    Execute user code in an isolated workspace and collect outputs.
-
-    input_files: optional map of relative_path -> base64 content to stage first.
-    """
     import base64
     import io
     import os
-    import shutil
     import signal
     import time
     import traceback
@@ -196,15 +241,35 @@ def _run_user_code(
     from pathlib import Path
 
     started = time.monotonic()
-    work = Path(WORK_ROOT)
-    if work.exists():
-        shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True, exist_ok=True)
 
-    # Stage input files (if any)
+    deps, dep_err = _sanitize_dependencies(dependencies)
+    if dep_err:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": dep_err,
+            "files": [],
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "error_type": "InvalidDependencies",
+        }
+
+    install_err = _install_dependencies(deps)
+    if install_err:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": install_err,
+            "files": [],
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "error_type": "DependencyInstallError",
+            "meta": {"dependencies": deps},
+        }
+
+    _prepare_workspace()
+    work = Path(WORK_ROOT)
+
     staged: list[str] = []
     for rel, b64 in (input_files or {}).items():
-        # Prevent path escape
         target = (work / rel).resolve()
         if not str(target).startswith(str(work.resolve())):
             return {
@@ -224,7 +289,6 @@ def _run_user_code(
     success = True
     error_type: str | None = None
 
-    # Soft timeout via SIGALRM (Unix only — Modal containers are Linux)
     def _timeout_handler(signum, frame):  # noqa: ARG001
         raise TimeoutError(f"Code execution exceeded {timeout_seconds}s")
 
@@ -235,7 +299,6 @@ def _run_user_code(
     old_cwd = os.getcwd()
     os.chdir(work)
 
-    # Rich but still sandboxed globals — standard builtins, no injected secrets
     exec_globals: dict = {
         "__name__": "__main__",
         "__file__": str(work / "main.py"),
@@ -248,6 +311,8 @@ def _run_user_code(
             signal.alarm(effective_timeout)
 
         with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            if deps:
+                print(f"[klaw] installed dependencies: {', '.join(deps)}")
             if staged:
                 print(f"[klaw] staged input files: {', '.join(staged)}")
             print(f"[klaw] workspace: {work}")
@@ -262,11 +327,12 @@ def _run_user_code(
             signal.alarm(0)
         os.chdir(old_cwd)
 
-    # Collect generated artifacts (skip nothing critical; skip huge files)
     files_out: list[dict] = []
     total_bytes = 0
     for path in sorted(work.rglob("*")):
         if not path.is_file():
+            continue
+        if path.name == "main.py":
             continue
         try:
             size = path.stat().st_size
@@ -307,6 +373,7 @@ def _run_user_code(
             "memory_mib": MEMORY_MIB,
             "cpu": CPU_CORES,
             "workspace": WORK_ROOT,
+            "dependencies": deps,
             "files_returned": len(files_out),
             "files_bytes": total_bytes,
         },
@@ -319,28 +386,17 @@ def _run_user_code(
     memory=MEMORY_MIB,
     timeout=TIMEOUT_SEC,
     ephemeral_disk=EPHEMERAL_DISK_MIB,
+    volumes={WORK_ROOT: output_vol},
 )
 @modal.fastapi_endpoint(method="POST")
 def execute_code(item: dict) -> dict:
     """
-    Execute Python code in the Klaw sandbox.
-
     Request JSON:
       {
-        "code": "print('hello')",                 # required
-        "files": { "data.csv": "<base64>" },      # optional staged inputs
-        "timeout_seconds": 120                    # optional soft limit
-      }
-
-    Response JSON:
-      {
-        "success": true,
-        "stdout": "...",
-        "stderr": "...",
-        "files": [{ "name", "path", "size", "media_type", "content_base64" }],
-        "duration_ms": 42,
-        "error_type": null,
-        "meta": { ... }
+        "code": "...",
+        "dependencies": ["optional-package"],
+        "files": { "in.csv": "<base64>" },
+        "timeout_seconds": 120
       }
     """
     if not isinstance(item, dict):
@@ -382,17 +438,27 @@ def execute_code(item: dict) -> dict:
         except (TypeError, ValueError):
             timeout_seconds = None
 
-    return _run_user_code(
+    dependencies = item.get("dependencies")
+
+    result = _run_user_code(
         code,
         input_files=input_files,
         timeout_seconds=timeout_seconds,
+        dependencies=dependencies if isinstance(dependencies, list) else None,
     )
+
+    # Persist generated files on the volume
+    try:
+        output_vol.commit()
+    except Exception:
+        pass
+
+    return result
 
 
 @app.function(image=image, cpu=0.25, memory=512, timeout=30)
 @modal.fastapi_endpoint(method="GET")
 def health() -> dict:
-    """Lightweight health / capability probe (small container)."""
     return {
         "status": "ok",
         "app": APP_NAME,
@@ -401,39 +467,23 @@ def health() -> dict:
             "memory_mib": MEMORY_MIB,
             "cpu": CPU_CORES,
             "timeout_sec": TIMEOUT_SEC,
-            "ephemeral_disk_mib": EPHEMERAL_DISK_MIB,
+            "workspace": WORK_ROOT,
+            "volume": "klaw-agent-outputs",
         },
-        "packages_sample": [
-            "numpy",
-            "pandas",
-            "polars",
-            "matplotlib",
-            "sklearn",
-            "docx",
-            "openpyxl",
-            "reportlab",
-            "fitz",  # PyMuPDF
-            "pdfplumber",
-            "PIL",
-            "cv2",
-            "sympy",
-            "bs4",
-            "httpx",
-        ],
-        "note": "All listed libraries are preinstalled in the execute_code image.",
+        "note": "Fat image preinstalls common libs; optional dependencies for rare packages only.",
     }
 
 
 @app.local_entrypoint()
 def main():
-    """Quick local smoke test: modal run modal/sandboxes/execute_code.py"""
+    """modal run modal/sandboxes/execute_code.py"""
     sample = (
         "import numpy as np, pandas as pd\n"
         "from pathlib import Path\n"
         "df = pd.DataFrame({'x': np.arange(5), 'y': np.arange(5) ** 2})\n"
-        "df.to_csv('out.csv', index=False)\n"
+        "df.to_csv('/mnt/data/out.csv', index=False)\n"
         "print(df.describe())\n"
-        "print('wrote', Path('out.csv').resolve())\n"
+        "print('wrote', Path('/mnt/data/out.csv').resolve())\n"
     )
     result = execute_code.remote({"code": sample})
     print("success:", result.get("success"))

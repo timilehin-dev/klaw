@@ -76,3 +76,39 @@ export async function callLLM(
   const data = await response.json();
   return data.choices[0].message;
 }
+
+/**
+ * Self-healing: DeepSeek V4 Pro rewrites failing Python given the error.
+ * Returns only the corrected source (markdown fences stripped when present).
+ */
+export async function fixCodeWithDeepSeek(
+  originalCode: string,
+  errorMessage: string
+): Promise<string> {
+  const fixPrompt = [
+    "The following Python code failed with this error:",
+    "",
+    "Code:",
+    "```python",
+    originalCode,
+    "```",
+    "",
+    "Error:",
+    errorMessage,
+    "",
+    "Please return ONLY the corrected Python code block, nothing else.",
+    "Keep using the /mnt/data workspace for any file outputs.",
+  ].join("\n");
+
+  const response = await callLLM(
+    "deepseek-v4-pro",
+    "You are an expert Python debugger. Return only corrected code.",
+    [{ role: "user", content: fixPrompt }]
+  );
+
+  const content = response.content || "";
+  const match =
+    content.match(/```python\n([\s\S]*?)\n```/) ||
+    content.match(/```\n([\s\S]*?)\n```/);
+  return (match ? match[1] : content).trim();
+}

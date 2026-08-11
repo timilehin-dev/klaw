@@ -1,5 +1,11 @@
 import { Inngest } from "inngest";
-import { callLLM, LLMMessage, selectModel, type ModelId } from "./llm/router";
+import {
+  callLLM,
+  fixCodeWithDeepSeek,
+  LLMMessage,
+  selectModel,
+  type ModelId,
+} from "./llm/router";
 import { agentTools } from "./tools/definitions";
 import { executeCodeInSandbox } from "./modal/client";
 import { ensureThreadExists, loadHistory, saveMessage } from "./memory";
@@ -11,6 +17,32 @@ import {
 } from "./skills/registry";
 
 export const inngest = new Inngest({ id: "klaw" });
+
+const MAX_SELF_HEAL_FIXES = 2;
+
+function formatExecResult(result: {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  files?: { path: string; size: number; media_type?: string }[];
+  duration_ms?: number;
+  error_type?: string | null;
+}): string {
+  const fileSummary =
+    result.files && result.files.length > 0
+      ? `\nFiles written: ${result.files
+          .map((f) => `${f.path} (${f.size} bytes, ${f.media_type || "unknown"})`)
+          .join(", ")}`
+      : "";
+  const timing =
+    result.duration_ms != null ? `\nDuration: ${result.duration_ms}ms` : "";
+
+  if (!result.success) {
+    return `Error: ${result.stderr || result.error_type || "execution failed"}\nstdout: ${result.stdout || ""}${fileSummary}${timing}`;
+  }
+  const errPart = result.stderr ? `\nstderr: ${result.stderr}` : "";
+  return `Success:\n${result.stdout || "(no stdout)"}${errPart}${fileSummary}${timing}`;
+}
 
 export const handleAgentTask = inngest.createFunction(
   {
@@ -28,11 +60,10 @@ export const handleAgentTask = inngest.createFunction(
       workspaceId: workspaceKey,
     } = event.data;
 
-    // Slack thread_ts (or message ts). Internal DB id is resolved below.
     const slackThreadTs: string = threadId;
     const workspace = workspaceKey || "default";
 
-    // 1. Initialize thread in Supabase & save the inbound user message
+    // 1. Schema-safe memory (internal UUID thread id)
     const dbThreadId = await step.run("init-memory", async () => {
       const id = await ensureThreadExists(
         slackThreadTs,
@@ -46,42 +77,34 @@ export const handleAgentTask = inngest.createFunction(
       return id;
     });
 
-    // 2. System prompt = base + 8 industry skills
+    // 2. Base prompt + 8 skills (+ dependency guidance)
     const systemPrompt = await step.run("load-context", async () => {
-      return buildBaseSystemPrompt() + loadSkillPrompts();
+      return (
+        buildBaseSystemPrompt() +
+        loadSkillPrompts() +
+        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`."
+      );
     });
 
     const history = await step.run("load-history", async () => {
       return await loadHistory(dbThreadId);
     });
 
-    // History already contains the latest user message — do not duplicate
     const messages: LLMMessage[] = [...history];
 
-    // Dual-model: pure reasoning/review → DeepSeek (no tools); else Kimi agentic loop
+    // Dual-model entry: pure reasoning → DeepSeek; else Kimi agentic loop
     const useReasoning = prefersReasoningModel(message);
-    const primaryModel: ModelId = selectModel(
-      useReasoning ? "reasoning" : "agentic"
-    );
-    logger.info(
-      `Model policy: ${primaryModel} (reasoning=${useReasoning})`
-    );
-
     let iterations = 0;
     let done = false;
     let finalResponseText = "";
-    let modelUsed: ModelId = primaryModel;
+    let modelUsed: ModelId = selectModel(
+      useReasoning ? "reasoning" : "agentic"
+    );
 
-    // 3a. Reasoning-only path (DeepSeek V4 Pro, no tools)
     if (useReasoning) {
       const llmResponse = await step.run("think-reasoning", async () => {
-        logger.info("Calling DeepSeek V4 Pro for reasoning-only path...");
-        return await callLLM(
-          "deepseek-v4-pro",
-          systemPrompt,
-          messages
-          // no tools
-        );
+        logger.info("DeepSeek V4 Pro reasoning-only path...");
+        return await callLLM("deepseek-v4-pro", systemPrompt, messages);
       });
 
       if (llmResponse.content) {
@@ -89,24 +112,21 @@ export const handleAgentTask = inngest.createFunction(
         finalResponseText = llmResponse.content;
         modelUsed = "deepseek-v4-pro";
         iterations = 1;
-
         await step.run("save-response", async () => {
-          logger.info("Reasoning path finished. Saving response to DB.");
           await saveMessage(dbThreadId, "assistant", finalResponseText);
         });
       } else {
-        // Fall through to agentic path if DeepSeek returned empty
-        logger.warn("DeepSeek returned empty content; falling back to agentic Kimi loop");
+        logger.warn("DeepSeek empty; falling back to Kimi agentic loop");
       }
     }
 
-    // 3b. Agentic path (Kimi K3 + tools + skills)
+    // 3. Kimi plans/tools; DeepSeek self-heals failing execute_code
     while (!done && iterations < 10) {
       iterations++;
       modelUsed = "kimi-k3";
 
-      const llmResponse = await step.run(`think-${iterations}`, async () => {
-        logger.info(`Iteration ${iterations}: Calling Kimi K3 (agentic)...`);
+      const llmResponse = await step.run(`think-kimi-${iterations}`, async () => {
+        logger.info(`Iteration ${iterations}: Kimi K3 thinking...`);
         return await callLLM("kimi-k3", systemPrompt, messages, agentTools);
       });
 
@@ -114,56 +134,81 @@ export const handleAgentTask = inngest.createFunction(
         messages.push(llmResponse);
 
         for (const tc of llmResponse.tool_calls) {
-          const toolName = tc.function.name as string;
-          const toolArgs = JSON.parse(tc.function.arguments || "{}");
+          const toolName = tc.function?.name as string;
+          let toolArgs: { code?: string; dependencies?: string[] } = {};
+          try {
+            toolArgs = JSON.parse(tc.function?.arguments || "{}");
+          } catch {
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: "Error: invalid tool arguments JSON",
+            });
+            continue;
+          }
 
-          const toolResult = await step.run(
-            `tool-${toolName}-${iterations}-${tc.id}`,
-            async () => {
-              logger.info(`Executing tool: ${toolName}`);
+          if (toolName !== "execute_code") {
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: "Tool not found.",
+            });
+            continue;
+          }
 
-              if (toolName === "execute_code") {
-                const result = await executeCodeInSandbox(toolArgs.code);
-                const fileSummary =
-                  result.files && result.files.length > 0
-                    ? `\nFiles written: ${result.files
-                        .map(
-                          (f) =>
-                            `${f.path} (${f.size} bytes, ${f.media_type || "unknown"})`
-                        )
-                        .join(", ")}`
-                    : "";
-                const timing =
-                  result.duration_ms != null
-                    ? `\nDuration: ${result.duration_ms}ms`
-                    : "";
+          let codeToRun = toolArgs.code || "";
+          const dependencies = Array.isArray(toolArgs.dependencies)
+            ? toolArgs.dependencies
+            : [];
+          let toolResultStr = "";
+          let success = false;
+          let fixAttempts = 0;
 
-                if (!result.success) {
-                  return `Error: ${result.stderr || result.error_type || "execution failed"}\nstdout: ${result.stdout || ""}${fileSummary}${timing}`;
-                }
-                const errPart = result.stderr
-                  ? `\nstderr: ${result.stderr}`
-                  : "";
-                return `Success:\n${result.stdout || "(no stdout)"}${errPart}${fileSummary}${timing}`;
+          // ACT + SELF-HEAL (DeepSeek) up to MAX_SELF_HEAL_FIXES
+          while (!success && fixAttempts <= MAX_SELF_HEAL_FIXES) {
+            const execResult = await step.run(
+              `execute-code-${iterations}-a${fixAttempts}-${tc.id}`,
+              async () => {
+                logger.info(
+                  `Modal execute attempt ${fixAttempts + 1}; deps=[${dependencies.join(", ")}]`
+                );
+                return await executeCodeInSandbox(codeToRun, { dependencies });
               }
+            );
 
-              return "Tool not found.";
+            if (execResult.success) {
+              success = true;
+              toolResultStr = formatExecResult(execResult);
+            } else if (fixAttempts < MAX_SELF_HEAL_FIXES) {
+              logger.info(
+                `Code failed: ${execResult.stderr}. Asking DeepSeek to fix...`
+              );
+              codeToRun = await step.run(
+                `fix-code-deepseek-${iterations}-a${fixAttempts}-${tc.id}`,
+                async () => {
+                  return await fixCodeWithDeepSeek(
+                    codeToRun,
+                    execResult.stderr || "Unknown error"
+                  );
+                }
+              );
+              fixAttempts++;
+            } else {
+              toolResultStr = `Failed after ${MAX_SELF_HEAL_FIXES + 1} attempts. Last error:\n${formatExecResult(execResult)}`;
+              fixAttempts++;
             }
-          );
+          }
 
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
-            content: toolResult,
+            content: toolResultStr || "Error: empty tool result",
           });
         }
-        // Loop continues with tool observations
       } else if (llmResponse.content) {
         done = true;
         finalResponseText = llmResponse.content;
-
         await step.run("save-response", async () => {
-          logger.info("Agent finished. Saving response to DB.");
           await saveMessage(dbThreadId, "assistant", finalResponseText);
         });
       } else {
@@ -184,11 +229,11 @@ export const handleAgentTask = inngest.createFunction(
       });
     }
 
-    // 4. Reply to Slack (threaded)
+    // 4. Slack threaded reply
     if (triggerSource === "slack" && channel) {
       await step.run("reply-slack", async () => {
         logger.info(
-          `Posting reply to Slack channel=${channel} thread_ts=${slackThreadTs} model=${modelUsed}`
+          `Slack reply channel=${channel} thread_ts=${slackThreadTs} model=${modelUsed}`
         );
         await getSlack().chat.postMessage({
           channel,
@@ -208,7 +253,7 @@ export const handleAgentTask = inngest.createFunction(
   }
 );
 
-export { callLLM, selectModel } from "./llm/router";
+export { callLLM, fixCodeWithDeepSeek, selectModel } from "./llm/router";
 export type { LLMMessage, ModelId } from "./llm/router";
 export { agentTools } from "./tools/definitions";
 export { executeCodeInSandbox } from "./modal/client";

@@ -28,12 +28,23 @@ export type ExecuteCodeOptions = {
   files?: Record<string, string>;
   /** Soft execution limit in seconds (capped by the Modal function timeout) */
   timeoutSeconds?: number;
+  /** Optional pip packages for rare deps not in the fat image */
+  dependencies?: string[];
 };
 
+/**
+ * Execute code in the Modal sandbox.
+ * Overload-friendly: second arg may be a dependencies string[] (Phase 5.1 style)
+ * or a full options object.
+ */
 export async function executeCodeInSandbox(
   code: string,
-  options: ExecuteCodeOptions = {}
+  optionsOrDeps: ExecuteCodeOptions | string[] = {}
 ): Promise<SandboxResult> {
+  const options: ExecuteCodeOptions = Array.isArray(optionsOrDeps)
+    ? { dependencies: optionsOrDeps }
+    : optionsOrDeps || {};
+
   const body: Record<string, unknown> = { code };
   if (options.files && Object.keys(options.files).length > 0) {
     body.files = options.files;
@@ -41,12 +52,14 @@ export async function executeCodeInSandbox(
   if (options.timeoutSeconds != null) {
     body.timeout_seconds = options.timeoutSeconds;
   }
+  if (options.dependencies && options.dependencies.length > 0) {
+    body.dependencies = options.dependencies;
+  }
 
   const response = await fetch(MODAL_EXECUTE_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      // "Authorization": `Bearer ${process.env.MODAL_KEY}` // Add if endpoint requires auth
     },
     body: JSON.stringify(body),
   });

@@ -12,10 +12,11 @@ High-memory, pre-provisioned Python environment used by the `execute_code` agent
 | CPU | 8 cores |
 | Timeout | 10 minutes |
 | Scratch disk | 100 GiB ephemeral |
-| Workspace | `/mnt/data` (cwd) |
+| Workspace | `/mnt/data` (cwd + Modal Volume `klaw-agent-outputs`) |
 | Plot backend | `Agg` (headless) |
+| Dynamic deps | Optional `dependencies[]` for rare packages (allowlisted) |
 
-All dependencies are **baked into the image** at build time. Agent code should `import` packages — never `pip install` at runtime.
+**Most** packages are baked into the image. Prefer `import` only. Use `dependencies` only for uncommon packages not on the fat image.
 
 ## What’s preinstalled
 
@@ -63,6 +64,7 @@ modal run modal/sandboxes/execute_code.py
 ```json
 {
   "code": "import pandas as pd\npd.DataFrame({'a':[1]}).to_csv('out.csv')\nprint('ok')",
+  "dependencies": ["optional-rare-package"],
   "files": {
     "input.csv": "<optional base64>"
   },
