@@ -5,10 +5,17 @@ import { supabaseBrowser } from "@/lib/supabase/client";
 
 type Message = { id: string; role: string; content: string };
 type Log = { id: string; step_name: string; status: string; detail?: string | null };
+type Approval = {
+  id: string;
+  tool_call_id: string;
+  code_preview: string | null;
+  status: string;
+};
 
 export default function DashboardPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
   const [input, setInput] = useState("");
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -24,6 +31,7 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error(json.error || "Failed to create thread");
       setMessages([]);
       setLogs([]);
+      setApprovals([]);
       setCurrentThreadId(json.id as string);
     } catch (e: any) {
       setError(e.message || "Could not create thread");
@@ -44,7 +52,35 @@ export default function DashboardPage() {
       .eq("thread_id", threadId)
       .order("created_at", { ascending: true });
     if (logData) setLogs(logData);
+
+    const { data: approvalData } = await supabaseBrowser
+      .from("approvals")
+      .select("id, tool_call_id, code_preview, status")
+      .eq("thread_id", threadId)
+      .eq("status", "pending")
+      .order("created_at", { ascending: false });
+    if (approvalData) setApprovals(approvalData);
   }, []);
+
+  const resolveApproval = async (toolCallId: string, approved: boolean) => {
+    if (!currentThreadId) return;
+    try {
+      const res = await fetch("/api/approvals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          toolCallId,
+          approved,
+          threadId: currentThreadId,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Approval failed");
+      setApprovals((prev) => prev.filter((a) => a.tool_call_id !== toolCallId));
+    } catch (e: any) {
+      setError(e.message || "Could not resolve approval");
+    }
+  };
 
   useEffect(() => {
     createNewThread();
@@ -149,6 +185,37 @@ export default function DashboardPage() {
               }`}
             >
               {msg.content}
+            </div>
+          </div>
+        ))}
+
+        {/* Pending HITL approvals */}
+        {approvals.map((a) => (
+          <div
+            key={a.id}
+            className="border border-amber-300 bg-amber-50 rounded-lg p-3 text-sm space-y-2"
+          >
+            <div className="font-medium text-amber-900">
+              ⚠️ Approval required
+            </div>
+            <pre className="text-[11px] font-mono bg-white border border-amber-200 rounded p-2 overflow-x-auto max-h-40">
+              {a.code_preview || "(no preview)"}
+            </pre>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => void resolveApproval(a.tool_call_id, true)}
+                className="text-xs px-3 py-1 rounded-md bg-emerald-600 text-white hover:bg-emerald-700"
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                onClick={() => void resolveApproval(a.tool_call_id, false)}
+                className="text-xs px-3 py-1 rounded-md bg-red-600 text-white hover:bg-red-700"
+              >
+                Deny
+              </button>
             </div>
           </div>
         ))}

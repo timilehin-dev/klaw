@@ -148,3 +148,22 @@ export async function saveMessage(
     throw new Error(`saveMessage failed: ${error.message}`);
   }
 }
+
+/**
+ * Load global guardrails for a workspace key (slack_team_id or "web").
+ * Also includes rules tagged workspace_id = "*".
+ */
+export async function loadConstraints(workspaceKey: string): Promise<string> {
+  const supabase = getSupabase();
+  const key = workspaceKey || "default";
+
+  const { data, error } = await supabase
+    .from("constraints")
+    .select("rule")
+    .or(`workspace_id.eq.${key},workspace_id.eq.*`);
+
+  if (error || !data || data.length === 0) return "";
+
+  const rules = data.map((c) => `- ${c.rule}`).join("\n");
+  return `\n\n# GLOBAL GUARDRAILS\nYou MUST strictly adhere to the following workspace constraints:\n${rules}`;
+}

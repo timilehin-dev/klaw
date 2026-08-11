@@ -13,6 +13,7 @@ export const agentTools = [
         "opencv, pytesseract, requests, httpx, beautifulsoup4, sympy, SQLAlchemy, psycopg2, …).",
         "Prefer imports without pip. Only set `dependencies` for rare packages NOT already available.",
         "Write outputs under /mnt/data; they are returned. Print key results to stdout.",
+        "Set requires_approval=true for destructive actions (delete files, drop tables, send email, external writes).",
       ].join(" "),
       parameters: {
         type: "object",
@@ -27,6 +28,11 @@ export const agentTools = [
             items: { type: "string" },
             description:
               "Optional pip packages to install before run if missing (e.g. ['yfinance']). Skip when using preinstalled libs.",
+          },
+          requires_approval: {
+            type: "boolean",
+            description:
+              "Set true if the code performs destructive or irreversible actions (delete files, drop DB tables, send emails, mutate production systems). False for read-only analysis or document generation.",
           },
         },
         required: ["code"],

@@ -8,9 +8,15 @@ import {
 } from "./llm/router";
 import { agentTools } from "./tools/definitions";
 import { executeCodeInSandbox } from "./modal/client";
-import { ensureThreadExists, loadHistory, saveMessage } from "./memory";
-import { getSlack } from "./clients";
+import {
+  ensureThreadExists,
+  loadHistory,
+  saveMessage,
+  loadConstraints,
+} from "./memory";
+import { getSlack, getSupabase } from "./clients";
 import { appendAgentLog } from "./logging";
+import { requiresHumanApproval } from "./guardrails";
 import {
   buildBaseSystemPrompt,
   loadSkillPrompts,
@@ -61,23 +67,18 @@ export const handleAgentTask = inngest.createFunction(
       workspaceId: workspaceKey,
     } = event.data;
 
-    // Slack events pass thread_ts; web dashboard passes internal UUID from /api/threads
     const slackThreadTs: string | null =
       triggerSource === "slack" ? threadId : null;
-    const workspace = workspaceKey || (triggerSource === "web" ? "web" : "default");
+    const workspace =
+      workspaceKey || (triggerSource === "web" ? "web" : "default");
 
-    // 1. Schema-safe memory (internal UUID thread id)
+    // 1. Schema-safe memory
     const dbThreadId = await step.run("init-memory", async () => {
       let id: string;
       if (triggerSource === "web") {
-        // Dashboard already created the thread row
         id = threadId as string;
       } else {
-        id = await ensureThreadExists(
-          threadId,
-          workspace,
-          channel || ""
-        );
+        id = await ensureThreadExists(threadId, workspace, channel || "");
       }
       await saveMessage(id, "user", message);
       await appendAgentLog(id, "task/received", "completed", triggerSource);
@@ -87,12 +88,15 @@ export const handleAgentTask = inngest.createFunction(
       return id;
     });
 
-    // 2. Base prompt + 8 skills (+ dependency guidance)
+    // 2. Base prompt + skills + workspace guardrails
     const systemPrompt = await step.run("load-context", async () => {
+      const skillsContext = loadSkillPrompts();
+      const constraintsContext = await loadConstraints(workspace);
       const prompt =
         buildBaseSystemPrompt() +
-        loadSkillPrompts() +
-        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`.";
+        skillsContext +
+        constraintsContext +
+        "\n\nIMPORTANT: Prefer preinstalled sandbox libraries. Only pass `dependencies` for rare packages not already available. Save all files under `/mnt/data`. Set requires_approval=true for destructive actions.";
       await appendAgentLog(dbThreadId, "load-context", "completed");
       return prompt;
     });
@@ -110,7 +114,6 @@ export const handleAgentTask = inngest.createFunction(
 
     const messages: LLMMessage[] = [...history];
 
-    // Dual-model entry: pure reasoning → DeepSeek; else Kimi agentic loop
     const useReasoning = prefersReasoningModel(message);
     let iterations = 0;
     let done = false;
@@ -148,7 +151,7 @@ export const handleAgentTask = inngest.createFunction(
       }
     }
 
-    // 3. Kimi plans/tools; DeepSeek self-heals failing execute_code
+    // 3. Agentic loop with HITL + self-heal
     while (!done && iterations < 10) {
       iterations++;
       modelUsed = "kimi-k3";
@@ -182,7 +185,11 @@ export const handleAgentTask = inngest.createFunction(
 
         for (const tc of llmResponse.tool_calls) {
           const toolName = tc.function?.name as string;
-          let toolArgs: { code?: string; dependencies?: string[] } = {};
+          let toolArgs: {
+            code?: string;
+            dependencies?: string[];
+            requires_approval?: boolean;
+          } = {};
           try {
             toolArgs = JSON.parse(tc.function?.arguments || "{}");
           } catch {
@@ -207,11 +214,125 @@ export const handleAgentTask = inngest.createFunction(
           const dependencies = Array.isArray(toolArgs.dependencies)
             ? toolArgs.dependencies
             : [];
+
+          // --- HUMAN-IN-THE-LOOP ---
+          const needsApproval = requiresHumanApproval(
+            codeToRun,
+            toolArgs.requires_approval
+          );
+
+          if (needsApproval) {
+            await step.run(`request-approval-${tc.id}`, async () => {
+              await appendAgentLog(
+                dbThreadId,
+                "request-approval",
+                "running",
+                tc.id
+              );
+              await getSupabase().from("approvals").insert({
+                thread_id: dbThreadId,
+                tool_call_id: tc.id,
+                code_preview: codeToRun.slice(0, 2000),
+                status: "pending",
+              });
+
+              if (triggerSource === "slack" && channel && slackThreadTs) {
+                const preview = codeToRun.slice(0, 500);
+                const valueApprove = JSON.stringify({
+                  toolCallId: tc.id,
+                  threadId: dbThreadId,
+                  decision: "approved",
+                });
+                const valueDeny = JSON.stringify({
+                  toolCallId: tc.id,
+                  threadId: dbThreadId,
+                  decision: "denied",
+                });
+
+                await getSlack().chat.postMessage({
+                  channel,
+                  thread_ts: slackThreadTs,
+                  text: "⚠️ Approval required for agent code execution",
+                  blocks: [
+                    {
+                      type: "section",
+                      text: {
+                        type: "mrkdwn",
+                        text: `⚠️ *Action requires approval:*\n\`\`\`python\n${preview}\n\`\`\``,
+                      },
+                    },
+                    {
+                      type: "actions",
+                      elements: [
+                        {
+                          type: "button",
+                          text: { type: "plain_text", text: "Approve" },
+                          style: "primary",
+                          action_id: "approve_code",
+                          value: valueApprove,
+                        },
+                        {
+                          type: "button",
+                          text: { type: "plain_text", text: "Deny" },
+                          style: "danger",
+                          action_id: "deny_code",
+                          value: valueDeny,
+                        },
+                      ],
+                    },
+                  ],
+                });
+              }
+
+              await appendAgentLog(
+                dbThreadId,
+                "request-approval",
+                "completed",
+                triggerSource === "web"
+                  ? "pending web approval"
+                  : "pending slack approval"
+              );
+            });
+
+            // Durable pause (up to 24h) for approval/resolved matching this tool call
+            const approvalEvent = await step.waitForEvent(
+              `wait-approval-${tc.id}`,
+              {
+                event: "approval/resolved",
+                timeout: "24h",
+                if: `async.data.toolCallId == "${tc.id}"`,
+              }
+            );
+
+            const approved = Boolean(
+              approvalEvent && (approvalEvent as any).data?.approved
+            );
+
+            if (!approved) {
+              logger.info(`Approval denied or timed out for ${tc.id}`);
+              await appendAgentLog(
+                dbThreadId,
+                "approval-denied",
+                "failed",
+                tc.id
+              );
+              messages.push({
+                role: "tool",
+                tool_call_id: tc.id,
+                content:
+                  "User denied this action (or approval timed out). Do not attempt the same destructive action again without asking.",
+              });
+              continue;
+            }
+
+            await appendAgentLog(dbThreadId, "approval-granted", "completed", tc.id);
+          }
+
+          // --- EXECUTION + SELF-HEAL ---
           let toolResultStr = "";
           let success = false;
           let fixAttempts = 0;
 
-          // ACT + SELF-HEAL (DeepSeek) up to MAX_SELF_HEAL_FIXES
           while (!success && fixAttempts <= MAX_SELF_HEAL_FIXES) {
             const execResult = await step.run(
               `execute-code-${iterations}-a${fixAttempts}-${tc.id}`,
@@ -304,7 +425,6 @@ export const handleAgentTask = inngest.createFunction(
       });
     }
 
-    // 4. Slack threaded reply (web UI polls Supabase for assistant message)
     if (triggerSource === "slack" && channel && slackThreadTs) {
       await step.run("reply-slack", async () => {
         logger.info(
@@ -347,10 +467,12 @@ export {
   ensureThreadExists,
   loadHistory,
   saveMessage,
+  loadConstraints,
 } from "./memory";
 export { getSupabase, getSlack, supabase, slack } from "./clients";
 export { appendAgentLog } from "./logging";
 export type { AgentLogStatus } from "./logging";
+export { requiresHumanApproval, codeLooksDestructive } from "./guardrails";
 export {
   loadSkillPrompts,
   listSkills,
