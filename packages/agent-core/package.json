@@ -6,7 +6,9 @@
   "types": "./index.ts",
   "exports": {
     ".": "./index.ts",
-    "./llm/router": "./llm/router.ts"
+    "./llm/router": "./llm/router.ts",
+    "./tools/definitions": "./tools/definitions.ts",
+    "./modal/client": "./modal/client.ts"
   },
   "dependencies": {
     "inngest": "^3.22.0",
