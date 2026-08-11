@@ -7,17 +7,16 @@ export const agentTools = [
       name: "execute_code",
       description: [
         "Execute Python 3.11 in Klaw's secure Modal sandbox (32GB RAM, 8 CPU).",
-        "Workspace is /mnt/data (cwd). Most common libraries are PREINSTALLED globally.",
-        "Prefer imports without pip. Only set `dependencies` for rare packages.",
-        "Write outputs under /mnt/data. Set requires_approval=true for destructive actions.",
+        "Best for calculations, data analysis, file generation, or API testing.",
+        "Most libraries are preinstalled. Only set dependencies for rare packages.",
+        "Set requires_approval=true for destructive actions.",
       ].join(" "),
       parameters: {
         type: "object",
         properties: {
           code: {
             type: "string",
-            description:
-              "Valid, self-contained Python 3.11 code. Save files under /mnt/data.",
+            description: "The Python code to execute. Save files under /mnt/data.",
           },
           dependencies: {
             type: "array",
@@ -38,16 +37,14 @@ export const agentTools = [
     type: "function",
     function: {
       name: "web_search",
-      description: [
-        "Search the live web with Tavily for research, facts, pricing, news, or documentation.",
-        "Use before browser automation when you only need information, not interaction.",
-      ].join(" "),
+      description:
+        "Search the live web for current information, news, documentation, or research (Tavily).",
       parameters: {
         type: "object",
         properties: {
           query: {
             type: "string",
-            description: "Search query string.",
+            description: "The search query.",
           },
           max_results: {
             type: "integer",
@@ -61,11 +58,50 @@ export const agentTools = [
   {
     type: "function",
     function: {
+      name: "browser_navigate",
+      description:
+        "Navigate to a specific URL in headless Chromium and extract the page text content.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: {
+            type: "string",
+            description: "The URL to visit.",
+          },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "browser_click",
+      description:
+        "Open a URL, click an element by CSS selector, and return the resulting page text.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: {
+            type: "string",
+            description: "The URL to visit first.",
+          },
+          selector: {
+            type: "string",
+            description: "CSS selector of the element to click.",
+          },
+        },
+        required: ["url", "selector"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "browser_action",
       description: [
-        "Control a headless Chromium browser (Playwright on Modal) to navigate pages,",
-        "click elements, type into fields, or capture page text/screenshots.",
-        "Use for JS-heavy sites or multi-step web flows that simple HTTP scrape cannot handle.",
+        "General browser control (navigate/click/type/screenshot/content).",
+        "Prefer browser_navigate or browser_click for simple cases.",
       ].join(" "),
       parameters: {
         type: "object",

@@ -228,17 +228,32 @@ export const handleAgentTask = inngest.createFunction(
           }
 
           // --- BROWSER (Playwright Modal) ---
-          if (toolName === "browser_action") {
+          // Supports script names browser_navigate / browser_click and unified browser_action
+          if (
+            toolName === "browser_action" ||
+            toolName === "browser_navigate" ||
+            toolName === "browser_click" ||
+            toolName === "browser_type"
+          ) {
+            const action =
+              toolName === "browser_navigate"
+                ? "navigate"
+                : toolName === "browser_click"
+                  ? "click"
+                  : toolName === "browser_type"
+                    ? "type"
+                    : (toolArgs.action as string) || "navigate";
+
             const browserResult = await step.run(
               `browser-${iterations}-${tc.id}`,
               async () => {
                 await appendAgentLog(
                   dbThreadId,
-                  `browser_${toolArgs.action || "action"}`,
+                  `browser_${action}`,
                   "running"
                 );
                 const r = await runBrowserAction({
-                  action: toolArgs.action,
+                  action: action as any,
                   url: toolArgs.url,
                   selector: toolArgs.selector,
                   text: toolArgs.text,
@@ -246,7 +261,7 @@ export const handleAgentTask = inngest.createFunction(
                 });
                 await appendAgentLog(
                   dbThreadId,
-                  `browser_${toolArgs.action || "action"}`,
+                  `browser_${action}`,
                   r.success ? "completed" : "failed",
                   r.success ? r.title || r.url : r.error
                 );
@@ -535,7 +550,7 @@ export type {
 } from "./modal/client";
 export { tavilySearch } from "./tools/tavily";
 export type { TavilyResult } from "./tools/tavily";
-export { runBrowserAction } from "./tools/browser";
+export { runBrowserAction, executeBrowserAction } from "./tools/browser";
 export type {
   BrowserActionInput,
   BrowserActionResult,

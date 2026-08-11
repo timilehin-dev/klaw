@@ -58,3 +58,23 @@ export async function runBrowserAction(
     };
   }
 }
+
+/** Script-style helper: returns a plain string for tool results */
+export async function executeBrowserAction(
+  action: string,
+  args: { url?: string; selector?: string; text?: string; wait_ms?: number }
+): Promise<string> {
+  const result = await runBrowserAction({
+    action: action as BrowserAction,
+    url: args.url || "",
+    selector: args.selector,
+    text: args.text,
+    wait_ms: args.wait_ms,
+  });
+
+  if (!result.success) {
+    return `Browser action failed: ${result.error || "unknown error"}`;
+  }
+
+  return `Page Content (${result.title || ""})\nURL: ${result.url || args.url}\n\n${result.content || ""}`;
+}

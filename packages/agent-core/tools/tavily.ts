@@ -27,9 +27,13 @@ export async function tavilySearch(
   const searchDepth = options.searchDepth ?? "basic";
 
   try {
+    // Tavily accepts api_key in body; also send Bearer for clients that expect it
     const response = await fetch("https://api.tavily.com/search", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
       body: JSON.stringify({
         api_key: apiKey,
         query,
