@@ -299,7 +299,9 @@ export const handleAgentTask = inngest.createFunction(
                 toolArgs.arguments && typeof toolArgs.arguments === "object"
                   ? (toolArgs.arguments as Record<string, unknown>)
                   : {};
-              const result = await callMcpTool(serverId, name, args);
+              const result = await callMcpTool(serverId, name, args, {
+                workspaceId: workspace,
+              });
               await appendAgentLog(
                 dbThreadId,
                 "mcp_call_tool",
@@ -921,10 +923,13 @@ export {
   describeFreeMcpRegistry,
 } from "./mcp/bridge";
 export {
+  MCP_REGISTRY,
   FREE_MCP_REGISTRY,
   getMcpServer,
+  listMcpServers,
   listFreeMcpServers,
   listZeroKeyMcpServers,
+  listReadyMcpServers,
 } from "./mcp/registry";
 export {
   mapSandboxFilesToArtifacts,

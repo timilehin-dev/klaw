@@ -3,6 +3,11 @@
  * Mirror public MCP server tool surfaces without requiring child processes.
  */
 
+import { execFile } from "child_process";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
+
 export type McpToolDef = {
   name: string;
   description: string;
@@ -14,9 +19,14 @@ export type McpCallResult = {
   isError?: boolean;
 };
 
-export function listInprocessTools(
-  kind: "time" | "sequential-thinking" | "echo"
-): McpToolDef[] {
+export type InprocessKind =
+  | "time"
+  | "sequential-thinking"
+  | "echo"
+  | "fetch"
+  | "git";
+
+export function listInprocessTools(kind: InprocessKind): McpToolDef[] {
   if (kind === "time") {
     return [
       {
@@ -61,7 +71,70 @@ export function listInprocessTools(
             totalThoughts: { type: "number" },
             nextThoughtNeeded: { type: "boolean" },
           },
-          required: ["thought", "thoughtNumber", "totalThoughts", "nextThoughtNeeded"],
+          required: [
+            "thought",
+            "thoughtNumber",
+            "totalThoughts",
+            "nextThoughtNeeded",
+          ],
+        },
+      },
+    ];
+  }
+  if (kind === "fetch") {
+    return [
+      {
+        name: "fetch",
+        description:
+          "Fetch a URL and return text/markdown-ish content for LLM use.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string" },
+            max_length: {
+              type: "number",
+              description: "Max characters to return (default 12000).",
+            },
+          },
+          required: ["url"],
+        },
+      },
+    ];
+  }
+  if (kind === "git") {
+    return [
+      {
+        name: "git_status",
+        description: "Show git status of a repository path (default cwd).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Repo root path." },
+          },
+        },
+      },
+      {
+        name: "git_log",
+        description: "Show recent git log (oneline).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            n: { type: "number", description: "Number of commits (default 10)." },
+          },
+        },
+      },
+      {
+        name: "git_show",
+        description: "Show a file at HEAD or a ref.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Repo root." },
+            file: { type: "string", description: "File path relative to repo." },
+            ref: { type: "string", description: "Git ref (default HEAD)." },
+          },
+          required: ["file"],
         },
       },
     ];
@@ -72,9 +145,7 @@ export function listInprocessTools(
       description: "Echo message back (MCP bridge smoke test).",
       inputSchema: {
         type: "object",
-        properties: {
-          message: { type: "string" },
-        },
+        properties: { message: { type: "string" } },
         required: ["message"],
       },
     },
@@ -82,15 +153,13 @@ export function listInprocessTools(
 }
 
 export async function callInprocessTool(
-  kind: "time" | "sequential-thinking" | "echo",
+  kind: InprocessKind,
   toolName: string,
   args: Record<string, unknown>
 ): Promise<McpCallResult> {
   try {
     if (kind === "echo") {
-      if (toolName !== "echo") {
-        return textError(`Unknown tool: ${toolName}`);
-      }
+      if (toolName !== "echo") return textError(`Unknown tool: ${toolName}`);
       return textOk(String(args.message ?? ""));
     }
 
@@ -110,24 +179,17 @@ export async function callInprocessTool(
         }
         return textOk(
           JSON.stringify(
-            {
-              timezone: tz,
-              datetime: now.toISOString(),
-              formatted,
-            },
+            { timezone: tz, datetime: now.toISOString(), formatted },
             null,
             2
           )
         );
       }
       if (toolName === "convert_time") {
-        // Simplified conversion: interpret time as today HH:mm in from_tz if not ISO
         const fromTz = String(args.from_timezone || "UTC");
         const toTz = String(args.to_timezone || "UTC");
         const timeStr = String(args.time || "");
-        const base = timeStr.includes("T")
-          ? new Date(timeStr)
-          : new Date();
+        const base = timeStr.includes("T") ? new Date(timeStr) : new Date();
         if (Number.isNaN(base.getTime())) {
           return textError(`Invalid time: ${timeStr}`);
         }
@@ -172,9 +234,7 @@ export async function callInprocessTool(
             totalThoughts: total,
             nextThoughtNeeded: next,
             thought,
-            status: next
-              ? "continue"
-              : "complete",
+            status: next ? "continue" : "complete",
           },
           null,
           2
@@ -182,10 +242,93 @@ export async function callInprocessTool(
       );
     }
 
+    if (kind === "fetch") {
+      if (toolName !== "fetch") return textError(`Unknown tool: ${toolName}`);
+      const url = String(args.url || "");
+      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        return textError("url must be http(s)");
+      }
+      const maxLen = Math.min(Number(args.max_length) || 12000, 50000);
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "Klaw-MCP-Fetch/1.0 (+https://github.com/timilehin-dev/klaw)",
+          Accept: "text/html,application/xhtml+xml,application/xml,text/plain,*/*",
+        },
+      });
+      if (!res.ok) {
+        return textError(`HTTP ${res.status} ${res.statusText}`);
+      }
+      const ct = res.headers.get("content-type") || "";
+      let text = await res.text();
+      if (ct.includes("html")) {
+        text = htmlToApproxMarkdown(text);
+      }
+      if (text.length > maxLen) {
+        text =
+          text.slice(0, maxLen) +
+          `\n...[truncated ${text.length - maxLen} chars]`;
+      }
+      return textOk(`# Fetch ${url}\n\n${text}`);
+    }
+
+    if (kind === "git") {
+      const cwd = String(args.path || process.cwd());
+      if (toolName === "git_status") {
+        const { stdout } = await execFileAsync("git", ["status", "--short", "--branch"], {
+          cwd,
+          timeout: 15000,
+        });
+        return textOk(stdout || "(clean)");
+      }
+      if (toolName === "git_log") {
+        const n = Math.min(Number(args.n) || 10, 50);
+        const { stdout } = await execFileAsync(
+          "git",
+          ["log", `-${n}`, "--oneline", "--decorate"],
+          { cwd, timeout: 15000 }
+        );
+        return textOk(stdout || "(no commits)");
+      }
+      if (toolName === "git_show") {
+        const file = String(args.file || "");
+        const ref = String(args.ref || "HEAD");
+        if (!file) return textError("file is required");
+        const { stdout } = await execFileAsync(
+          "git",
+          ["show", `${ref}:${file}`],
+          { cwd, timeout: 15000, maxBuffer: 2 * 1024 * 1024 }
+        );
+        const body =
+          stdout.length > 20000
+            ? stdout.slice(0, 20000) + "\n...[truncated]"
+            : stdout;
+        return textOk(body);
+      }
+      return textError(`Unknown git tool: ${toolName}`);
+    }
+
     return textError(`Unknown in-process kind: ${kind}`);
   } catch (e: any) {
     return textError(e?.message || "in-process MCP call failed");
   }
+}
+
+function htmlToApproxMarkdown(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<\/h[1-6]>/gi, "\n\n")
+    .replace(/<h([1-6])[^>]*>/gi, (_, n) => "#".repeat(Number(n)) + " ")
+    .replace(/<li[^>]*>/gi, "- ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function textOk(text: string): McpCallResult {
