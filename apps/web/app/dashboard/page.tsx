@@ -79,7 +79,11 @@ export default function DashboardPage() {
     ]);
     setLogs((prev) => [
       ...prev,
-      { id: `init-${Date.now()}`, step_name: "task/received", status: "running" },
+      {
+        id: `init-${Date.now()}`,
+        step_name: "task/received",
+        status: "running",
+      },
     ]);
 
     try {
@@ -114,75 +118,73 @@ export default function DashboardPage() {
         <button
           type="button"
           onClick={() => void createNewThread()}
-          className="text-xs px-3 py-1.5 rounded-md bg-primary text-white hover:bg-primary-hover"
+          className="text-xs text-primary hover:underline"
         >
-          New thread
+          + New Thread
         </button>
       </header>
 
-      {/* Timeline strip */}
-      {logs.length > 0 && (
-        <div className="border-b border-border bg-surface/80 px-4 py-2 flex gap-2 overflow-x-auto shrink-0">
-          {logs.map((log) => (
-            <span
-              key={log.id}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-mono whitespace-nowrap ${
-                log.status === "completed"
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                  : log.status === "failed"
-                    ? "border-red-200 bg-red-50 text-red-800"
-                    : "border-border bg-background text-text-muted"
-              }`}
-            >
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${
-                  log.status === "completed"
-                    ? "bg-emerald-500"
-                    : log.status === "failed"
-                      ? "bg-red-500"
-                      : "bg-amber-400 animate-pulse"
-                }`}
-              />
-              {log.step_name}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
-        {messages.length === 0 && (
-          <div className="h-full flex flex-col items-center justify-center text-center text-text-muted text-sm gap-2">
+      {/* Timeline / Chat Area */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {messages.length === 0 && logs.length === 0 && (
+          <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-center text-text-muted text-sm gap-2">
             <div className="h-10 w-10 rounded-lg bg-primary/10" />
-            <p>Send a message to start the Klaw agent.</p>
+            <p>Message the agent to start a Klaw run.</p>
             <p className="text-xs max-w-sm">
-              The agent can use the 32GB sandbox, skills, and dual-model routing.
-              Timeline steps appear above as work runs.
+              Live Time-Travel steps appear below as Inngest writes agent_logs.
             </p>
           </div>
         )}
 
-        {messages.map((m) => (
+        {messages.map((msg) => (
           <div
-            key={m.id}
-            className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+            key={msg.id}
+            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
           >
             <div
-              className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
-                m.role === "user"
+              className={`max-w-[70%] p-3 rounded-lg text-sm whitespace-pre-wrap ${
+                msg.role === "user"
                   ? "bg-primary text-white"
-                  : m.role === "assistant"
-                    ? "bg-surface border border-border"
-                    : "bg-background border border-border text-text-muted"
+                  : "bg-surface border border-border"
               }`}
             >
-              <div className="text-[10px] uppercase tracking-wider opacity-70 mb-1">
-                {m.role}
-              </div>
-              {m.content}
+              {msg.content}
             </div>
           </div>
         ))}
+
+        {/* Agent Logs (Time-Travel Timeline) */}
+        {logs.length > 0 && (
+          <div className="border border-dashed border-border rounded-lg p-3 bg-background font-mono text-xs text-text-muted space-y-1">
+            <div className="text-[10px] uppercase tracking-wider text-text-muted/80 mb-1">
+              Time-Travel
+            </div>
+            {logs.map((log) => (
+              <div key={log.id} className="flex items-center gap-2">
+                <span
+                  className={
+                    log.status === "running"
+                      ? "animate-pulse text-primary"
+                      : log.status === "failed"
+                        ? "text-red-500"
+                        : "text-text-muted"
+                  }
+                >
+                  {log.status === "running"
+                    ? "●"
+                    : log.status === "failed"
+                      ? "✕"
+                      : "○"}
+                </span>
+                <span>{log.step_name}</span>
+                {log.detail && (
+                  <span className="truncate opacity-60">— {log.detail}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         <div ref={bottomRef} />
       </div>
 
@@ -192,29 +194,27 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Composer */}
-      <div className="border-t border-border bg-surface p-3 shrink-0">
-        <div className="flex gap-2">
-          <textarea
+      {/* Input Area */}
+      <div className="p-4 border-t border-border bg-surface shrink-0">
+        <div className="flex items-center gap-2 border border-border rounded-lg p-2 bg-background">
+          <input
+            type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void handleSend();
-              }
+              if (e.key === "Enter") void handleSend();
             }}
-            rows={2}
-            placeholder="Ask Klaw to analyze data, generate a PDF, review code…"
-            className="flex-1 resize-none rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+            placeholder="Message the agent..."
+            className="flex-1 bg-transparent outline-none text-sm px-2"
+            disabled={sending || !currentThreadId}
           />
           <button
             type="button"
-            disabled={sending || !input.trim() || !currentThreadId}
             onClick={() => void handleSend()}
-            className="self-end px-4 py-2 rounded-md bg-primary text-white text-sm font-medium hover:bg-primary-hover disabled:opacity-50"
+            disabled={sending || !input.trim() || !currentThreadId}
+            className="bg-primary text-white text-xs px-3 py-1 rounded-md hover:bg-primary-hover transition-colors disabled:opacity-50"
           >
-            {sending ? "Sending…" : "Send"}
+            {sending ? "…" : "Send"}
           </button>
         </div>
       </div>
